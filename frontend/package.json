@@ -11,6 +11,7 @@
   },
   "dependencies": {
     "@ant-design/icons": "^6.1.0",
+    "@ant-design/plots": "^2.6.8",
     "@monaco-editor/react": "^4.7.0",
     "@solidity-parser/parser": "^0.20.2",
     "antd": "^6.3.2",

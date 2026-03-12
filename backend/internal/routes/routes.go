@@ -7,6 +7,7 @@ import (
 	"gorm.io/gorm"
 
 	"sc-vuln-detector/backend/internal/handlers"
+	"sc-vuln-detector/backend/internal/service"
 )
 
 func Register(r *gin.Engine, gdb *gorm.DB) {
@@ -22,6 +23,8 @@ func Register(r *gin.Engine, gdb *gorm.DB) {
 		}
 
 		if gdb != nil {
+			trainer := service.NewTrainer(gdb)
+
 			prompts := api.Group("/prompts")
 			{
 				h := handlers.NewPromptHandlers(gdb)
@@ -38,6 +41,21 @@ func Register(r *gin.Engine, gdb *gorm.DB) {
 				mappings.POST("", h.CreateMapping)
 				mappings.PUT("/:id", h.UpdateMapping)
 				mappings.DELETE("/:id", h.DeleteMapping)
+			}
+
+			train := api.Group("/train")
+			{
+				h := handlers.NewTrainHandlers(gdb, trainer)
+				train.POST("/jobs", h.CreateJob)
+				train.GET("/jobs/:id", h.GetJob)
+				train.GET("/jobs/:id/metrics", h.GetJobMetrics)
+			}
+
+			models := api.Group("/models")
+			{
+				h := handlers.NewTrainHandlers(gdb, trainer)
+				models.GET("", h.ListModels)
+				models.POST("/:id/load", h.LoadModel)
 			}
 		} else {
 			api.Any("/prompts", func(c *gin.Context) {

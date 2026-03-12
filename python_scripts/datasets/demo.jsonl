@@ -1,0 +1,4 @@
+{"id":"c1","label":1,"source":"// safe\npragma solidity ^0.8.0;\ncontract Safe {\n  function f(uint x) public pure returns(uint){return x+1;}\n}\n"}
+{"id":"c2","label":0,"source":"// vulnerable (toy)\npragma solidity ^0.8.0;\ncontract Vuln {\n  mapping(address=>uint) public b;\n  function withdraw() public {\n    uint a=b[msg.sender];\n    (bool ok,) = msg.sender.call{value:a}(\"\");\n    require(ok);\n    b[msg.sender]=0;\n  }\n}\n"}
+{"id":"c3","label":1,"source":"pragma solidity ^0.8.0;\ncontract Safe2 {\n  function g() public pure returns(uint){return 1;}\n}\n"}
+{"id":"c4","label":0,"source":"pragma solidity ^0.8.0;\ncontract Vuln2 {\n  function h() public {}\n}\n"}

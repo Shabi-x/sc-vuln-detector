@@ -1,1 +1,4 @@
 node_modules
+
+# Python demo outputs (训练产物示例，不入库)
+python_scripts/demo_outputs/

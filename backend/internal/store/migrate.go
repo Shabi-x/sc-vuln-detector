@@ -15,6 +15,9 @@ func AutoMigrate(gdb *gorm.DB) error {
 	return gdb.AutoMigrate(
 		&model.Prompt{},
 		&model.PromptMapping{},
+		&model.TrainJob{},
+		&model.TrainMetric{},
+		&model.TrainedModel{},
 	)
 }
 

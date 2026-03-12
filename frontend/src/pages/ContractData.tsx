@@ -290,9 +290,6 @@ export default function ContractData() {
                 </Col>
               </Row>
               <Divider style={{ margin: '12px 0' }} />
-              <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                双栏对比：左侧原始代码，右侧预处理后代码（自动高亮差异）
-              </Typography.Text>
               <div style={{ height: 520, marginTop: 8, borderRadius: 12, overflow: 'hidden' }}>
                 <DiffEditor
                   language="sol"

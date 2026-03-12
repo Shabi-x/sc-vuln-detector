@@ -9,7 +9,7 @@ import {
 import { Outlet, useLocation, useNavigate } from 'react-router-dom'
 import type { MenuProps } from 'antd'
 
-const { Header, Sider, Content } = Layout
+const { Sider, Content } = Layout
 
 const items: MenuProps['items'] = [
   {
@@ -75,19 +75,6 @@ export default function MainLayout() {
         />
       </Sider>
       <Layout>
-        <Header
-          style={{
-            background: '#fff',
-            borderBottom: '1px solid rgba(5, 5, 5, 0.06)',
-            padding: '0 20px',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'space-between',
-          }}
-        >
-          <div />
-          <div />
-        </Header>
         <Content style={{ padding: 20 }}>
           <Outlet />
         </Content>

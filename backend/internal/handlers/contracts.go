@@ -36,7 +36,8 @@ func PreprocessContract(c *gin.Context) {
 		return
 	}
 
-	out := preprocess.Run(req.Source)
+	// 按文档口径：预处理同时结合“正则 + 语法分析（解析失败自动回退）”
+	out := preprocess.RunAST(req.Source)
 	res := preprocessResponse{}
 	res.Original.Source = req.Source
 	res.Original.Lines = preprocess.CountLines(req.Source)

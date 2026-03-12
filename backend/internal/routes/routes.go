@@ -1,0 +1,58 @@
+package routes
+
+import (
+	"net/http"
+
+	"github.com/gin-gonic/gin"
+	"gorm.io/gorm"
+
+	"sc-vuln-detector/backend/internal/handlers"
+)
+
+func Register(r *gin.Engine, gdb *gorm.DB) {
+	api := r.Group("/api")
+	{
+		api.GET("/health", func(c *gin.Context) {
+			c.JSON(http.StatusOK, gin.H{"ok": true})
+		})
+
+		contracts := api.Group("/contracts")
+		{
+			contracts.POST("/preprocess", handlers.PreprocessContract)
+		}
+
+		if gdb != nil {
+			prompts := api.Group("/prompts")
+			{
+				h := handlers.NewPromptHandlers(gdb)
+				prompts.GET("", h.ListPrompts)
+				prompts.POST("", h.CreatePrompt)
+				prompts.PUT("/:id", h.UpdatePrompt)
+				prompts.DELETE("/:id", h.DeletePrompt)
+			}
+
+			mappings := api.Group("/prompt-mappings")
+			{
+				h := handlers.NewPromptHandlers(gdb)
+				mappings.GET("", h.ListMappings)
+				mappings.POST("", h.CreateMapping)
+				mappings.PUT("/:id", h.UpdateMapping)
+				mappings.DELETE("/:id", h.DeleteMapping)
+			}
+		} else {
+			api.Any("/prompts", func(c *gin.Context) {
+				c.JSON(http.StatusServiceUnavailable, gin.H{"message": "数据库未初始化"})
+			})
+			api.Any("/prompts/*any", func(c *gin.Context) {
+				c.JSON(http.StatusServiceUnavailable, gin.H{"message": "数据库未初始化"})
+			})
+			api.Any("/prompt-mappings", func(c *gin.Context) {
+				c.JSON(http.StatusServiceUnavailable, gin.H{"message": "数据库未初始化"})
+			})
+			api.Any("/prompt-mappings/*any", func(c *gin.Context) {
+				c.JSON(http.StatusServiceUnavailable, gin.H{"message": "数据库未初始化"})
+			})
+		}
+	}
+}
+

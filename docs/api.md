@@ -71,15 +71,149 @@
 
 ## 2. 提示模板配置（规划）
 
-> 该模块后续落地时会补齐：模板 CRUD、标签映射规则 CRUD、模板与规则绑定关系。
+> 本模块用于管理提示调优所需的 **提示模板（硬/软）** 与 **标签词映射规则（verbalizer）**，供后续训练/检测/鲁棒性评估复用与追溯。
 
-建议接口（规划）：
-- GET `/api/prompts`
-- POST `/api/prompts`
-- PUT `/api/prompts/:id`
-- DELETE `/api/prompts/:id`
-- GET `/api/prompt-mappings?promptId=...`
-- POST `/api/prompt-mappings`
+### 2.1 GET `/api/prompts`
+查询模板列表。
+
+Query 参数（可选）：
+- `type`: `hard` / `soft`
+- `active`: `true`（仅返回启用模板）
+
+**Response 200**
+
+```json
+[
+  {
+    "id": "uuid",
+    "name": "Hard Prompt v1",
+    "type": "hard",
+    "description": "用于二分类提示调优",
+    "templateText": "The code [X] is [MASK].",
+    "softConfigJson": "",
+    "isPreset": false,
+    "isActive": true,
+    "createdAt": "2026-03-12T10:00:00Z",
+    "updatedAt": "2026-03-12T10:00:00Z"
+  }
+]
+```
+
+---
+
+### 2.2 POST `/api/prompts`
+创建模板。
+
+**Request**
+
+```json
+{
+  "name": "Hard Prompt v1",
+  "type": "hard",
+  "description": "用于二分类提示调优",
+  "templateText": "The code [X] is [MASK].",
+  "softConfigJson": "",
+  "isActive": true
+}
+```
+
+说明：
+- `type=hard` 时要求 `templateText` **必须包含** `[X]`
+- `type=soft` 时推荐把软提示参数写在 `softConfigJson`（JSON 字符串）
+
+**Response 201**：返回创建后的模板对象（同上结构）
+
+---
+
+### 2.3 PUT `/api/prompts/:id`
+更新模板（部分字段可选）。
+
+**Request**
+
+```json
+{
+  "name": "Hard Prompt v2",
+  "description": "更新描述",
+  "templateText": "The code [X] is [MASK].",
+  "isActive": true
+}
+```
+
+**Response 200**：返回更新后的模板对象
+
+---
+
+### 2.4 DELETE `/api/prompts/:id`
+删除模板（会同时删除该模板下的映射规则）。
+
+**Response 204**：无返回体
+
+---
+
+### 2.5 GET `/api/prompt-mappings?promptId=...`
+查询指定模板的标签词映射列表。
+
+**Response 200**
+
+```json
+[
+  {
+    "id": "uuid",
+    "promptId": "prompt-uuid",
+    "token": "bad",
+    "label": "vulnerable",
+    "isDefault": true,
+    "createdAt": "2026-03-12T10:00:00Z",
+    "updatedAt": "2026-03-12T10:00:00Z"
+  }
+]
+```
+
+说明：
+- `label=vulnerable` 表示“有漏洞”
+- `label=nonVulnerable` 表示“无漏洞”
+
+---
+
+### 2.6 POST `/api/prompt-mappings`
+创建映射规则。
+
+**Request**
+
+```json
+{
+  "promptId": "prompt-uuid",
+  "token": "good",
+  "label": "nonVulnerable",
+  "isDefault": true
+}
+```
+
+**Response 201**：返回创建后的映射对象
+
+---
+
+### 2.7 PUT `/api/prompt-mappings/:id`
+更新映射规则（部分字段可选）。
+
+**Request**
+
+```json
+{
+  "token": "bad",
+  "label": "vulnerable",
+  "isDefault": true
+}
+```
+
+**Response 200**：返回更新后的映射对象
+
+---
+
+### 2.8 DELETE `/api/prompt-mappings/:id`
+删除映射规则。
+
+**Response 204**：无返回体
 
 ---
 

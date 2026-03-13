@@ -1,1 +1,1 @@
-毕业设计
+My undergraduate graduation project

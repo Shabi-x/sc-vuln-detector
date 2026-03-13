@@ -13,6 +13,7 @@ func AutoMigrate(gdb *gorm.DB) error {
 		return fmt.Errorf("db is nil")
 	}
 	return gdb.AutoMigrate(
+		&model.Contract{},
 		&model.Prompt{},
 		&model.PromptMapping{},
 		&model.TrainJob{},

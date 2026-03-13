@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   Alert,
   Button,
@@ -6,9 +6,12 @@ import {
   Col,
   Divider,
   Input,
+  Modal,
+  Popconfirm,
   Row,
   Space,
   Statistic,
+  Table,
   Tabs,
   Typography,
   Upload,
@@ -18,7 +21,12 @@ import type { UploadFile } from "antd";
 import { InboxOutlined } from "@ant-design/icons";
 import { DiffEditor } from "@monaco-editor/react";
 import {
+  deleteContract,
+  getContract,
+  listContracts,
   preprocessContract,
+  type ContractDetail,
+  type ContractSummary,
   type PreprocessResponse,
 } from "../services/contracts";
 import { countLines, tryParseSolidity } from "../utils/solidity";
@@ -48,7 +56,7 @@ function downloadTextAsFile(text: string, filename: string) {
 }
 
 export default function ContractData() {
-  const [tab, setTab] = useState<"upload" | "paste">("upload");
+  const [tab, setTab] = useState<"upload" | "paste" | "saved">("upload");
   const [fileList, setFileList] = useState<UploadFile[]>([]);
   const [pasted, setPasted] = useState("");
 
@@ -58,10 +66,55 @@ export default function ContractData() {
   const [busy, setBusy] = useState(false);
   const [syntaxError, setSyntaxError] = useState<string | null>(null);
 
+  const [contracts, setContracts] = useState<ContractSummary[]>([]);
+  const [loadingContracts, setLoadingContracts] = useState(false);
+  const [detailVisible, setDetailVisible] = useState(false);
+  const [detailLoading, setDetailLoading] = useState(false);
+  const [contractDetail, setContractDetail] = useState<ContractDetail | null>(
+    null,
+  );
+
   const canRun = useMemo(() => {
     if (tab === "paste") return pasted.trim().length > 0;
-    return fileList.length > 0;
+    if (tab === "upload") return fileList.length > 0;
+    return false;
   }, [fileList.length, pasted, tab]);
+
+  const refreshContracts = async () => {
+    try {
+      setLoadingContracts(true);
+      const data = await listContracts();
+      setContracts(data);
+    } catch (e) {
+      message.error(
+        `加载已保存合约失败：${e instanceof Error ? e.message : String(e)}`,
+      );
+    } finally {
+      setLoadingContracts(false);
+    }
+  };
+
+  useEffect(() => {
+    if (tab === "saved") {
+      void refreshContracts();
+    }
+  }, [tab]);
+
+  const openDetail = async (id: string) => {
+    try {
+      setDetailLoading(true);
+      setDetailVisible(true);
+      const data = await getContract(id);
+      setContractDetail(data);
+    } catch (e) {
+      message.error(
+        `加载合约详情失败：${e instanceof Error ? e.message : String(e)}`,
+      );
+      setDetailVisible(false);
+    } finally {
+      setDetailLoading(false);
+    }
+  };
 
   const onRun = async () => {
     setSyntaxError(null);
@@ -155,200 +208,305 @@ export default function ContractData() {
         </Row>
         <Divider style={{ margin: "16px 0" }} />
 
-        <Row gutter={[16, 16]}>
-          <Col xs={24} lg={10}>
-            <Tabs
-              activeKey={tab}
-              onChange={(k) => setTab(k as "upload" | "paste")}
-              items={[
-                {
-                  key: "upload",
-                  label: "文件上传",
-                  children: (
-                    <Space
-                      direction="vertical"
-                      size={12}
-                      style={{ width: "100%" }}
+        {/* 上：三个 Tab（上传 / 粘贴 / 已保存合约） */}
+        <div style={{ marginBottom: 16 }}>
+          <Tabs
+            activeKey={tab}
+            onChange={(k) => setTab(k as "upload" | "paste" | "saved")}
+            items={[
+              {
+                key: "upload",
+                label: "文件上传",
+                children: (
+                  <Space
+                    direction="vertical"
+                    size={12}
+                    style={{ width: "100%" }}
+                  >
+                    <Upload.Dragger
+                      multiple
+                      accept=".sol"
+                      fileList={fileList}
+                      beforeUpload={(file) => {
+                        if (!isSolFile(file.name)) {
+                          message.error("仅支持 .sol 文件");
+                          return Upload.LIST_IGNORE;
+                        }
+                        if (file.size > MAX_SIZE_MB * 1024 * 1024) {
+                          message.error(`文件大小不能超过 ${MAX_SIZE_MB}MB`);
+                          return Upload.LIST_IGNORE;
+                        }
+                        if (fileList.length >= MAX_FILES) {
+                          message.error(`最多上传 ${MAX_FILES} 份合约`);
+                          return Upload.LIST_IGNORE;
+                        }
+                        return false;
+                      }}
+                      onChange={(info) => {
+                        const next = info.fileList.slice(-MAX_FILES);
+                        setFileList(next);
+                      }}
+                      onRemove={() => {
+                        setStats(null);
+                        setProcessed("");
+                        return true;
+                      }}
+                      showUploadList={{ showRemoveIcon: true }}
+                      style={{ borderRadius: 12 }}
                     >
-                      <Upload.Dragger
-                        multiple
-                        accept=".sol"
-                        fileList={fileList}
-                        beforeUpload={(file) => {
-                          if (!isSolFile(file.name)) {
-                            message.error("仅支持 .sol 文件");
-                            return Upload.LIST_IGNORE;
-                          }
-                          if (file.size > MAX_SIZE_MB * 1024 * 1024) {
-                            message.error(`文件大小不能超过 ${MAX_SIZE_MB}MB`);
-                            return Upload.LIST_IGNORE;
-                          }
-                          if (fileList.length >= MAX_FILES) {
-                            message.error(`最多上传 ${MAX_FILES} 份合约`);
-                            return Upload.LIST_IGNORE;
-                          }
-                          return false;
-                        }}
-                        onChange={(info) => {
-                          const next = info.fileList.slice(-MAX_FILES);
-                          setFileList(next);
-                        }}
-                        onRemove={() => {
-                          setStats(null);
-                          setProcessed("");
-                          return true;
-                        }}
-                        showUploadList={{ showRemoveIcon: true }}
-                        style={{ borderRadius: 12 }}
-                      >
-                        <p className="ant-upload-drag-icon">
-                          <InboxOutlined />
-                        </p>
-                        <p className="ant-upload-text">
-                          拖拽 .sol 文件到此处，或点击选择
-                        </p>
-                        <p className="ant-upload-hint">
-                          支持批量，前端会校验扩展名/大小；当前原型默认对队列第一份进行预处理
-                        </p>
-                      </Upload.Dragger>
-                    </Space>
-                  ),
-                },
-                {
-                  key: "paste",
-                  label: "文本粘贴",
-                  children: (
-                    <Space
-                      direction="vertical"
-                      size={12}
-                      style={{ width: "100%" }}
-                    >
-                      <Input.TextArea
-                        value={pasted}
-                        onChange={(e) => setPasted(e.target.value)}
-                        placeholder="直接粘贴 Solidity 合约源码…"
-                        autoSize={{ minRows: 10, maxRows: 18 }}
-                        style={{ borderRadius: 12 }}
-                      />
-                      <Typography.Text
-                        type="secondary"
-                        style={{ fontSize: 12 }}
-                      >
-                        行数：{countLines(pasted)}
-                      </Typography.Text>
-                    </Space>
-                  ),
-                },
-              ]}
+                      <p className="ant-upload-drag-icon">
+                        <InboxOutlined />
+                      </p>
+                      <p className="ant-upload-text">
+                        拖拽 .sol 文件到此处，或点击选择
+                      </p>
+                      <p className="ant-upload-hint">
+                        支持批量，前端会校验扩展名/大小；当前原型默认对队列第一份进行预处理
+                      </p>
+                    </Upload.Dragger>
+                  </Space>
+                ),
+              },
+              {
+                key: "paste",
+                label: "文本粘贴",
+                children: (
+                  <Space
+                    direction="vertical"
+                    size={12}
+                    style={{ width: "100%" }}
+                  >
+                    <Input.TextArea
+                      value={pasted}
+                      onChange={(e) => setPasted(e.target.value)}
+                      placeholder="直接粘贴 Solidity 合约源码…"
+                      autoSize={{ minRows: 10, maxRows: 18 }}
+                      style={{ borderRadius: 12 }}
+                    />
+                    <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                      行数：{countLines(pasted)}
+                    </Typography.Text>
+                  </Space>
+                ),
+              },
+              {
+                key: "saved",
+                label: "已保存合约",
+                children: (
+                  <div style={{ marginTop: 8 }}>
+                    <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                      展示已通过预处理并自动入库的合约概要。
+                    </Typography.Text>
+                    <Table
+                      size="small"
+                      rowKey="id"
+                      style={{ marginTop: 8 }}
+                      loading={loadingContracts}
+                      pagination={false}
+                      columns={[
+                        {
+                          title: "名称",
+                          dataIndex: "name",
+                        },
+                        {
+                          title: "处理时间",
+                          dataIndex: "createdAt",
+                          render: (v: string) => new Date(v).toLocaleString(),
+                        },
+                        {
+                          title: "操作",
+                          key: "action",
+                          render: (_, record: ContractSummary) => (
+                            <Space size={4}>
+                              <Button
+                                type="link"
+                                size="small"
+                                onClick={() => void openDetail(record.id)}
+                              >
+                                查看
+                              </Button>
+                              <Popconfirm
+                                title="确认删除该合约？"
+                                okText="删除"
+                                cancelText="取消"
+                                onConfirm={async () => {
+                                  try {
+                                    await deleteContract(record.id);
+                                    message.success("已删除合约");
+                                    void refreshContracts();
+                                  } catch (e) {
+                                    message.error(
+                                      `删除失败：${
+                                        e instanceof Error
+                                          ? e.message
+                                          : String(e)
+                                      }`,
+                                    );
+                                  }
+                                }}
+                              >
+                                <Button type="link" size="small" danger>
+                                  删除
+                                </Button>
+                              </Popconfirm>
+                            </Space>
+                          ),
+                        },
+                      ]}
+                      dataSource={contracts}
+                      locale={{
+                        emptyText: loadingContracts
+                          ? "加载中…"
+                          : "暂无已保存合约；合约预处理后即自动入库。",
+                      }}
+                    />
+                  </div>
+                ),
+              },
+            ]}
+          />
+
+          {syntaxError ? (
+            <Alert
+              type="error"
+              showIcon
+              message="基础语法校验未通过"
+              description={syntaxError}
             />
+          ) : null}
+        </div>
 
-            {syntaxError ? (
-              <Alert
-                type="error"
-                showIcon
-                message="基础语法校验未通过"
-                description={syntaxError}
-              />
-            ) : null}
-          </Col>
-
-          <Col xs={24} lg={14}>
-            <Card
-              bordered={false}
-              style={{ borderRadius: 12, background: "#fafafa" }}
-              styles={{ body: { padding: 16 } }}
-            >
-              <Row justify="end" style={{ marginBottom: 8 }}>
-                <Space>
-                  <Button
-                    disabled={!canExportProcessed}
-                    onClick={async () => {
-                      try {
-                        await navigator.clipboard.writeText(processed);
-                        message.success("已复制预处理后代码");
-                      } catch {
-                        message.error("复制失败：浏览器未授权剪贴板权限");
-                      }
-                    }}
-                  >
-                    复制结果
-                  </Button>
-                  <Button
-                    type="primary"
-                    disabled={!canExportProcessed}
-                    onClick={() => {
-                      const base =
-                        tab === "upload"
-                          ? fileList[0]?.name?.replace(/\.sol$/i, "") ??
-                            "contract"
-                          : "pasted";
-                      downloadTextAsFile(processed, `${base}.processed.sol`);
-                    }}
-                  >
-                    下载 .sol
-                  </Button>
-                </Space>
-              </Row>
-              <Row gutter={[16, 12]}>
-                <Col xs={12} sm={6}>
-                  <Statistic
-                    title="原始行数"
-                    value={stats?.original.lines ?? countLines(original)}
-                  />
-                </Col>
-                <Col xs={12} sm={6}>
-                  <Statistic
-                    title="处理后行数"
-                    value={
-                      stats?.processed.lines ??
-                      (processed ? countLines(processed) : 0)
-                    }
-                  />
-                </Col>
-                <Col xs={12} sm={6}>
-                  <Statistic
-                    title="删除行数"
-                    value={stats?.removedLines ?? 0}
-                  />
-                </Col>
-                <Col xs={12} sm={6}>
-                  <Statistic
-                    title="压缩比例"
-                    value={
-                      stats
-                        ? `${Math.round(stats.compressionRatio * 100)}%`
-                        : "--"
-                    }
-                  />
-                </Col>
-              </Row>
-              <Divider style={{ margin: "12px 0" }} />
-              <div
-                style={{
-                  height: 520,
-                  marginTop: 8,
-                  borderRadius: 12,
-                  overflow: "hidden",
+        {/* 下：预处理 diff 模块（原始 vs 处理后） */}
+        <Card
+          bordered={false}
+          style={{ borderRadius: 12, background: "#fafafa" }}
+          styles={{ body: { padding: 16 } }}
+        >
+          <Row justify="end" style={{ marginBottom: 8 }}>
+            <Space>
+              <Button
+                disabled={!canExportProcessed}
+                onClick={async () => {
+                  try {
+                    await navigator.clipboard.writeText(processed);
+                    message.success("已复制预处理后代码");
+                  } catch {
+                    message.error("复制失败：浏览器未授权剪贴板权限");
+                  }
                 }}
               >
-                <DiffEditor
-                  language="sol"
-                  original={original || " "}
-                  modified={processed || " "}
-                  options={{
-                    renderSideBySide: true,
-                    readOnly: true,
-                    minimap: { enabled: false },
-                    scrollBeyondLastLine: false,
-                    fontSize: 13,
-                    wordWrap: "on",
-                  }}
-                />
-              </div>
-            </Card>
-          </Col>
-        </Row>
+                复制结果
+              </Button>
+              <Button
+                type="primary"
+                disabled={!canExportProcessed}
+                onClick={() => {
+                  const base =
+                    tab === "upload"
+                      ? (fileList[0]?.name?.replace(/\.sol$/i, "") ??
+                        "contract")
+                      : "pasted";
+                  downloadTextAsFile(processed, `${base}.processed.sol`);
+                }}
+              >
+                下载 .sol
+              </Button>
+            </Space>
+          </Row>
+          <Row gutter={[16, 12]}>
+            <Col xs={12} sm={6}>
+              <Statistic
+                title="原始行数"
+                value={stats?.original.lines ?? countLines(original)}
+              />
+            </Col>
+            <Col xs={12} sm={6}>
+              <Statistic
+                title="处理后行数"
+                value={
+                  stats?.processed.lines ??
+                  (processed ? countLines(processed) : 0)
+                }
+              />
+            </Col>
+            <Col xs={12} sm={6}>
+              <Statistic title="删除行数" value={stats?.removedLines ?? 0} />
+            </Col>
+            <Col xs={12} sm={6}>
+              <Statistic
+                title="压缩比例"
+                value={
+                  stats ? `${Math.round(stats.compressionRatio * 100)}%` : "--"
+                }
+              />
+            </Col>
+          </Row>
+          <Divider style={{ margin: "12px 0" }} />
+          <div
+            style={{
+              height: 520,
+              marginTop: 8,
+              borderRadius: 12,
+              overflow: "hidden",
+            }}
+          >
+            <DiffEditor
+              language="sol"
+              original={original || " "}
+              modified={processed || " "}
+              options={{
+                renderSideBySide: true,
+                readOnly: true,
+                minimap: { enabled: false },
+                scrollBeyondLastLine: false,
+                fontSize: 13,
+                wordWrap: "on",
+              }}
+            />
+          </div>
+        </Card>
       </Card>
+
+      <Modal
+        open={detailVisible}
+        onCancel={() => {
+          setDetailVisible(false);
+          setContractDetail(null);
+        }}
+        title={contractDetail?.name ?? "合约详情"}
+        width={960}
+        footer={null}
+        destroyOnClose
+      >
+        {detailLoading ? (
+          <Typography.Text type="secondary">加载中…</Typography.Text>
+        ) : contractDetail ? (
+          <div
+            style={{
+              height: 480,
+              marginTop: 8,
+              borderRadius: 12,
+              overflow: "hidden",
+            }}
+          >
+            <DiffEditor
+              language="sol"
+              original={contractDetail.source || " "}
+              modified={contractDetail.processedSource || " "}
+              options={{
+                renderSideBySide: true,
+                readOnly: true,
+                minimap: { enabled: false },
+                scrollBeyondLastLine: false,
+                fontSize: 13,
+                wordWrap: "on",
+              }}
+            />
+          </div>
+        ) : (
+          <Typography.Text type="secondary">未找到合约内容。</Typography.Text>
+        )}
+      </Modal>
     </Space>
   );
 }

@@ -19,6 +19,7 @@ func AutoMigrate(gdb *gorm.DB) error {
 		&model.TrainJob{},
 		&model.TrainMetric{},
 		&model.TrainedModel{},
+		&model.DetectJob{},
+		&model.DetectResult{},
 	)
 }
-

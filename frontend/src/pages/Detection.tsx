@@ -1,11 +1,384 @@
-import PlaceholderPage from './PlaceholderPage'
+import { useEffect, useMemo, useState } from 'react'
+import {
+  Button,
+  Card,
+  Col,
+  Divider,
+  Empty,
+  Progress,
+  Radio,
+  Row,
+  Select,
+  Space,
+  Table,
+  Tag,
+  Typography,
+  message,
+} from 'antd'
+import type { ColumnsType } from 'antd/es/table'
+import { listContracts, type ContractSummary } from '../services/contracts'
+import {
+  listPromptMappings,
+  listPrompts,
+  type Label,
+  type Prompt,
+} from '../services/prompts'
+import { listModels, type TrainedModel } from '../services/training'
+import {
+  createDetectBatchJob,
+  detectOne,
+  getDetectBatchJob,
+  type BatchDetectResult,
+  type DetectJob,
+  type DetectResult,
+} from '../services/detection'
+
+type Mode = 'single' | 'batch'
+
+const labelText: Record<Label, string> = {
+  vulnerable: '有漏洞',
+  nonVulnerable: '无漏洞',
+}
 
 export default function Detection() {
+  const [mode, setMode] = useState<Mode>('single')
+  const [loading, setLoading] = useState(false)
+  const [contracts, setContracts] = useState<ContractSummary[]>([])
+  const [prompts, setPrompts] = useState<Prompt[]>([])
+  const [models, setModels] = useState<TrainedModel[]>([])
+
+  const [selectedPromptId, setSelectedPromptId] = useState<string>()
+  const [selectedModelId, setSelectedModelId] = useState<string>()
+  const [selectedContractId, setSelectedContractId] = useState<string>()
+  const [selectedContractIds, setSelectedContractIds] = useState<string[]>([])
+
+  const [singleResult, setSingleResult] = useState<DetectResult | null>(null)
+  const [currentJob, setCurrentJob] = useState<DetectJob | null>(null)
+  const [batchResults, setBatchResults] = useState<BatchDetectResult[]>([])
+  const [mappingCount, setMappingCount] = useState(0)
+
+  const loadedModel = useMemo(() => models.find((m) => m.isLoaded) ?? null, [models])
+  const selectedPrompt = useMemo(
+    () => prompts.find((p) => p.id === selectedPromptId) ?? null,
+    [prompts, selectedPromptId],
+  )
+  const selectedContractName = useMemo(
+    () => contracts.find((c) => c.id === selectedContractId)?.name ?? selectedContractId ?? '',
+    [contracts, selectedContractId],
+  )
+
+  useEffect(() => {
+    const init = async () => {
+      try {
+        setLoading(true)
+        const [cs, ps, ms] = await Promise.all([
+          listContracts(),
+          listPrompts({ active: true }),
+          listModels(),
+        ])
+        setContracts(cs)
+        setPrompts(ps)
+        setModels(ms)
+        if (ps.length > 0) setSelectedPromptId(ps[0]!.id)
+        if (ms.some((m) => m.isLoaded)) {
+          setSelectedModelId(ms.find((m) => m.isLoaded)!.id)
+        }
+        if (cs.length > 0) {
+          setSelectedContractId(cs[0]!.id)
+          setSelectedContractIds([cs[0]!.id])
+        }
+      } catch (e) {
+        message.error(`初始化失败：${e instanceof Error ? e.message : String(e)}`)
+      } finally {
+        setLoading(false)
+      }
+    }
+    void init()
+  }, [])
+
+  useEffect(() => {
+    const loadMappings = async () => {
+      if (!selectedPromptId) {
+        setMappingCount(0)
+        return
+      }
+      try {
+        const mappings = await listPromptMappings(selectedPromptId)
+        setMappingCount(mappings.length)
+      } catch {
+        setMappingCount(0)
+      }
+    }
+    void loadMappings()
+  }, [selectedPromptId])
+
+  const getErrMsg = (e: unknown) => {
+    if (typeof e === 'object' && e !== null) {
+      const resp = (e as { response?: { data?: { error?: string; message?: string } } }).response
+      if (resp?.data?.error) return resp.data.error
+      if (resp?.data?.message) return resp.data.message
+    }
+    return e instanceof Error ? e.message : String(e)
+  }
+
+  const pollBatchJob = (jobId: string) => {
+    const tick = async () => {
+      try {
+        const data = await getDetectBatchJob(jobId)
+        setCurrentJob(data.job)
+        setBatchResults(data.results)
+        if (data.job.status === 'queued' || data.job.status === 'running') {
+          setTimeout(tick, 1000)
+        }
+      } catch (e) {
+        message.error(`获取任务状态失败：${e instanceof Error ? e.message : String(e)}`)
+      }
+    }
+    void tick()
+  }
+
+  const onDetectSingle = async () => {
+    if (!selectedContractId || !selectedPromptId) {
+      message.warning('请先选择合约与提示模板')
+      return
+    }
+    if (mappingCount === 0) {
+      message.warning('当前模板未配置标签词映射，请先到“提示模板-标签词映射”中添加')
+      return
+    }
+    try {
+      setLoading(true)
+      const data = await detectOne({
+        contractId: selectedContractId,
+        promptId: selectedPromptId,
+        modelId: selectedModelId || undefined,
+      })
+      setSingleResult(data.result)
+      message.success('检测完成')
+    } catch (e) {
+      message.error(`检测失败：${getErrMsg(e)}`)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const onDetectBatch = async () => {
+    if (!selectedPromptId || selectedContractIds.length === 0) {
+      message.warning('请先选择模板和待测合约')
+      return
+    }
+    if (mappingCount === 0) {
+      message.warning('当前模板未配置标签词映射，请先到“提示模板-标签词映射”中添加')
+      return
+    }
+    try {
+      setLoading(true)
+      const job = await createDetectBatchJob({
+        contractIds: selectedContractIds,
+        promptId: selectedPromptId,
+        modelId: selectedModelId || undefined,
+      })
+      setCurrentJob(job)
+      setBatchResults([])
+      message.success('批量检测任务已创建')
+      pollBatchJob(job.id)
+    } catch (e) {
+      message.error(`创建任务失败：${getErrMsg(e)}`)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const progressPercent = useMemo(() => {
+    if (!currentJob) return 0
+    let total = 0
+    try {
+      const params = JSON.parse(currentJob.paramsJson) as { contractIds?: string[] }
+      total = params.contractIds?.length ?? 0
+    } catch {
+      total = 0
+    }
+    if (total === 0) return 0
+    return Math.min(100, Math.round((batchResults.length / total) * 100))
+  }, [currentJob, batchResults.length])
+
+  const batchColumns: ColumnsType<BatchDetectResult> = [
+    {
+      title: '合约',
+      dataIndex: 'contractId',
+      render: (id: string) => contracts.find((c) => c.id === id)?.name ?? id,
+    },
+    {
+      title: '结论',
+      dataIndex: 'label',
+      width: 120,
+      render: (l: Label) => (
+        <Tag color={l === 'vulnerable' ? 'red' : 'green'}>{labelText[l]}</Tag>
+      ),
+    },
+    {
+      title: '置信度',
+      dataIndex: 'confidence',
+      width: 120,
+      render: (v: number) => v.toFixed(4),
+    },
+    {
+      title: '漏洞类型',
+      dataIndex: 'vulnType',
+      width: 160,
+      render: (s: string) => s || '--',
+    },
+    { title: '命中标签词', dataIndex: 'matchedToken', width: 150 },
+    { title: '耗时(ms)', dataIndex: 'elapsedMs', width: 100 },
+  ]
+
   return (
-    <PlaceholderPage
-      title="漏洞检测"
-      description="单份/批量合约检测触发、结果展示与漏洞位置可视化。"
-    />
+    <Space direction="vertical" size={16} style={{ width: '100%' }}>
+      <Card bordered={false} style={{ borderRadius: 12 }} styles={{ body: { padding: 20 } }}>
+        <Row gutter={[16, 12]} align="middle">
+          <Col flex="auto">
+            <Typography.Title level={3} style={{ marginTop: 0, marginBottom: 4 }}>
+              漏洞检测
+            </Typography.Title>
+            <Typography.Text type="secondary">
+              使用已加载模型和提示模板，对预处理合约执行单份或批量漏洞检测并输出置信度结果。
+            </Typography.Text>
+          </Col>
+        </Row>
+
+        <Divider style={{ margin: '16px 0' }} />
+
+        <Row gutter={16}>
+          <Col xs={24} lg={8}>
+            <Typography.Text type="secondary">检测模式</Typography.Text>
+            <div style={{ marginTop: 8 }}>
+              <Radio.Group
+                value={mode}
+                onChange={(e) => setMode(e.target.value as Mode)}
+                optionType="button"
+                buttonStyle="solid"
+                options={[
+                  { label: '单份检测', value: 'single' },
+                  { label: '批量检测', value: 'batch' },
+                ]}
+              />
+            </div>
+          </Col>
+          <Col xs={24} lg={8}>
+            <Typography.Text type="secondary">提示模板</Typography.Text>
+            <Select
+              style={{ width: '100%', marginTop: 8 }}
+              value={selectedPromptId}
+              onChange={setSelectedPromptId}
+              options={prompts.map((p) => ({ value: p.id, label: p.name }))}
+              placeholder="选择模板"
+            />
+          </Col>
+          <Col xs={24} lg={8}>
+            <Typography.Text type="secondary">模型（默认已加载）</Typography.Text>
+            <Select
+              style={{ width: '100%', marginTop: 8 }}
+              value={selectedModelId}
+              onChange={setSelectedModelId}
+              options={models.map((m) => ({
+                value: m.id,
+                label: `${m.name}${m.isLoaded ? '（已加载）' : ''}`,
+              }))}
+              placeholder="未选择时使用当前已加载模型"
+              allowClear
+            />
+          </Col>
+        </Row>
+
+        <Divider style={{ margin: '16px 0' }} />
+
+        {mode === 'single' ? (
+          <Space direction="vertical" size={12} style={{ width: '100%' }}>
+            <Typography.Text type="secondary">待测合约</Typography.Text>
+            <Select
+              style={{ width: '100%' }}
+              value={selectedContractId}
+              onChange={setSelectedContractId}
+              options={contracts.map((c) => ({ value: c.id, label: c.name }))}
+              placeholder="选择待测合约"
+              showSearch
+              optionFilterProp="label"
+            />
+            <Button type="primary" onClick={() => void onDetectSingle()} loading={loading}>
+              开始单份检测
+            </Button>
+
+            {singleResult ? (
+              <Card size="small" style={{ borderRadius: 12, background: '#fafafa' }}>
+                <Space direction="vertical" size={8}>
+                  <Typography.Text>
+                    合约：<Typography.Text strong>{selectedContractName}</Typography.Text>
+                  </Typography.Text>
+                  <Space>
+                    <Tag color={singleResult.label === 'vulnerable' ? 'red' : 'green'}>
+                      {labelText[singleResult.label]}
+                    </Tag>
+                    <Tag>置信度 {singleResult.confidence.toFixed(4)}</Tag>
+                    <Tag>命中 token: {singleResult.matchedToken || '--'}</Tag>
+                    {singleResult.vulnType ? <Tag color="orange">{singleResult.vulnType}</Tag> : null}
+                  </Space>
+                  <Typography.Text type="secondary">
+                    TopK: {singleResult.topK.map((x) => `${x.token}(${x.score.toFixed(4)})`).join(', ')}
+                  </Typography.Text>
+                </Space>
+              </Card>
+            ) : (
+              <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无检测结果" />
+            )}
+          </Space>
+        ) : (
+          <Space direction="vertical" size={12} style={{ width: '100%' }}>
+            <Typography.Text type="secondary">待批量检测合约</Typography.Text>
+            <Select
+              mode="multiple"
+              style={{ width: '100%' }}
+              value={selectedContractIds}
+              onChange={setSelectedContractIds}
+              options={contracts.map((c) => ({ value: c.id, label: c.name }))}
+              placeholder="选择待批量检测合约"
+              showSearch
+              optionFilterProp="label"
+            />
+            <Button type="primary" onClick={() => void onDetectBatch()} loading={loading}>
+              启动批量检测
+            </Button>
+
+            {currentJob ? (
+              <>
+                <Typography.Text type="secondary">
+                  当前任务：{currentJob.id} | 状态：{currentJob.status}
+                </Typography.Text>
+                <Progress
+                  percent={progressPercent}
+                  size="small"
+                  status={currentJob.status === 'failed' ? 'exception' : 'active'}
+                />
+                <Table
+                  rowKey="id"
+                  size="small"
+                  columns={batchColumns}
+                  dataSource={batchResults}
+                  pagination={{ pageSize: 8, hideOnSinglePage: true }}
+                />
+              </>
+            ) : (
+              <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无批量检测任务" />
+            )}
+          </Space>
+        )}
+
+        <Divider style={{ margin: '16px 0 0' }} />
+        <Typography.Text type="secondary">
+          当前模板：{selectedPrompt?.name || '--'}；映射数量：{mappingCount}；当前已加载模型：
+          {loadedModel?.name || '未加载'}
+        </Typography.Text>
+      </Card>
+    </Space>
   )
 }
 

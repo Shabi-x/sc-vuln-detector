@@ -28,6 +28,7 @@ func Register(r *gin.Engine, gdb *gorm.DB) {
 			}
 
 			trainer := service.NewTrainer(gdb)
+			detector := service.NewDetector(gdb)
 
 			prompts := api.Group("/prompts")
 			{
@@ -61,6 +62,14 @@ func Register(r *gin.Engine, gdb *gorm.DB) {
 				models.GET("", h.ListModels)
 				models.POST("/:id/load", h.LoadModel)
 			}
+
+			detect := api.Group("/detect")
+			{
+				h := handlers.NewDetectHandlers(gdb, detector)
+				detect.POST("", h.DetectOne)
+				detect.POST("/batch", h.CreateBatchJob)
+				detect.GET("/jobs/:id", h.GetBatchJob)
+			}
 		} else {
 			contracts := api.Group("/contracts")
 			{
@@ -80,7 +89,12 @@ func Register(r *gin.Engine, gdb *gorm.DB) {
 			api.Any("/prompt-mappings/*any", func(c *gin.Context) {
 				c.JSON(http.StatusServiceUnavailable, gin.H{"message": "数据库未初始化"})
 			})
+			api.Any("/detect", func(c *gin.Context) {
+				c.JSON(http.StatusServiceUnavailable, gin.H{"message": "数据库未初始化"})
+			})
+			api.Any("/detect/*any", func(c *gin.Context) {
+				c.JSON(http.StatusServiceUnavailable, gin.H{"message": "数据库未初始化"})
+			})
 		}
 	}
 }
-

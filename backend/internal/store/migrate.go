@@ -21,5 +21,7 @@ func AutoMigrate(gdb *gorm.DB) error {
 		&model.TrainedModel{},
 		&model.DetectJob{},
 		&model.DetectResult{},
+		&model.AdversarialSample{},
+		&model.RobustJob{},
 	)
 }

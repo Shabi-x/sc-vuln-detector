@@ -14,7 +14,7 @@ export default function PlaceholderPage(props: {
         {props.title}
       </Typography.Title>
       <Typography.Paragraph type="secondary" style={{ marginBottom: 0 }}>
-        {props.description ?? '该模块将按计划逐步实现。'}
+        {props.description ?? ''}
       </Typography.Paragraph>
     </Card>
   )

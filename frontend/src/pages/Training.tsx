@@ -316,9 +316,9 @@ export default function Training() {
           <Row gutter={16}>
             <Col xs={24} lg={8}>
               <Form.Item
-                label="数据集标识（占位）"
+                label="数据集标识"
                 name="datasetRef"
-                tooltip="当前阶段使用后端内置 demo 数据集；后续可扩展为真实数据集配置或上传。"
+                tooltip="当前使用后端内置数据集；后续可扩展为真实数据集配置或上传。"
               >
                 <Input placeholder="例如：demo / reentrancy-small" />
               </Form.Item>

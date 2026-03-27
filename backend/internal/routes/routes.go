@@ -29,6 +29,7 @@ func Register(r *gin.Engine, gdb *gorm.DB) {
 
 			trainer := service.NewTrainer(gdb)
 			detector := service.NewDetector(gdb)
+			robustSrv := service.NewRobustService(gdb, detector)
 
 			prompts := api.Group("/prompts")
 			{
@@ -70,6 +71,14 @@ func Register(r *gin.Engine, gdb *gorm.DB) {
 				detect.POST("/batch", h.CreateBatchJob)
 				detect.GET("/jobs/:id", h.GetBatchJob)
 			}
+
+			robust := api.Group("/robust")
+			{
+				h := handlers.NewRobustHandlers(gdb, robustSrv)
+				robust.GET("/jobs", h.ListJobs)
+				robust.POST("/evaluate", h.CreateJob)
+				robust.GET("/jobs/:id", h.GetJob)
+			}
 		} else {
 			contracts := api.Group("/contracts")
 			{
@@ -93,6 +102,9 @@ func Register(r *gin.Engine, gdb *gorm.DB) {
 				c.JSON(http.StatusServiceUnavailable, gin.H{"message": "数据库未初始化"})
 			})
 			api.Any("/detect/*any", func(c *gin.Context) {
+				c.JSON(http.StatusServiceUnavailable, gin.H{"message": "数据库未初始化"})
+			})
+			api.Any("/robust/*any", func(c *gin.Context) {
 				c.JSON(http.StatusServiceUnavailable, gin.H{"message": "数据库未初始化"})
 			})
 		}

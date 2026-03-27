@@ -170,6 +170,8 @@ func (d *Detector) runBatch(jobID string) {
 	}
 
 	var success, failed int
+	labelStats := map[model.Label]int{}
+	vulnTypeStats := map[string]int{}
 	for _, cid := range p.ContractIDs {
 		var ct model.Contract
 		if err := d.DB.WithContext(ctx).First(&ct, "id = ?", cid).Error; err != nil {
@@ -197,13 +199,19 @@ func (d *Detector) runBatch(jobID string) {
 			failed++
 			continue
 		}
+		labelStats[label]++
+		if vulnType != "" {
+			vulnTypeStats[vulnType]++
+		}
 		success++
 	}
 
 	resultBytes, _ := json.Marshal(map[string]any{
-		"total":   len(p.ContractIDs),
-		"success": success,
-		"failed":  failed,
+		"total":        len(p.ContractIDs),
+		"success":      success,
+		"failed":       failed,
+		"labelStats":   labelStats,
+		"vulnTypeStats": vulnTypeStats,
 	})
 	finish := time.Now()
 	_ = d.DB.WithContext(ctx).Model(&model.DetectJob{}).Where("id = ?", jobID).

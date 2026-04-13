@@ -1,52 +1,52 @@
-import { Layout, Menu, Typography } from 'antd'
+import { Layout, Menu, Typography } from "antd";
 import {
   CloudUploadOutlined,
   ExperimentOutlined,
   FileSearchOutlined,
   SafetyCertificateOutlined,
   SettingOutlined,
-} from '@ant-design/icons'
-import { Outlet, useLocation, useNavigate } from 'react-router-dom'
-import type { MenuProps } from 'antd'
+} from "@ant-design/icons";
+import { Outlet, useLocation, useNavigate } from "react-router-dom";
+import type { MenuProps } from "antd";
 
-const { Sider, Content } = Layout
+const { Sider, Content } = Layout;
 
-const items: MenuProps['items'] = [
+const items: MenuProps["items"] = [
   {
-    key: '/contracts',
+    key: "/contracts",
     icon: <CloudUploadOutlined />,
-    label: '数据管理',
+    label: "数据管理",
   },
   {
-    key: '/training',
+    key: "/training",
     icon: <ExperimentOutlined />,
-    label: '小样本训练',
+    label: "小样本训练",
   },
   {
-    key: '/detection',
+    key: "/detection",
     icon: <FileSearchOutlined />,
-    label: '漏洞检测',
+    label: "漏洞检测",
   },
   {
-    key: '/robustness',
+    key: "/robustness",
     icon: <SafetyCertificateOutlined />,
-    label: '对抗与鲁棒性',
+    label: "对抗与鲁棒性",
   },
   {
-    key: '/prompts',
+    key: "/prompts",
     icon: <SettingOutlined />,
-    label: '提示模板',
+    label: "提示模板",
   },
-  {
-    key: '/report',
-    icon: <SettingOutlined />,
-    label: '报告导出',
-  },
-]
+  // {
+  //   key: '/report',
+  //   icon: <SettingOutlined />,
+  //   label: '报告导出',
+  // },
+];
 
 export default function MainLayout() {
-  const nav = useNavigate()
-  const loc = useLocation()
+  const nav = useNavigate();
+  const loc = useLocation();
 
   return (
     <Layout className="app-shell">
@@ -54,11 +54,11 @@ export default function MainLayout() {
         theme="light"
         width={248}
         style={{
-          borderRight: '1px solid rgba(5, 5, 5, 0.06)',
-          background: '#fff',
+          borderRight: "1px solid rgba(5, 5, 5, 0.06)",
+          background: "#fff",
         }}
       >
-        <div style={{ padding: '16px 16px 8px 16px' }}>
+        <div style={{ padding: "16px 16px 8px 16px" }}>
           <Typography.Title level={4} style={{ margin: 0 }}>
             SC Vuln Detector
           </Typography.Title>
@@ -80,6 +80,5 @@ export default function MainLayout() {
         </Content>
       </Layout>
     </Layout>
-  )
+  );
 }
-

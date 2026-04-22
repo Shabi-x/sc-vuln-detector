@@ -358,251 +358,266 @@ export default function Robustness() {
         {activeTab === "run" ? (
           <>
             <Row gutter={16}>
-          <Col xs={24} lg={8}>
-            <Typography.Text type="secondary">模型</Typography.Text>
-            <Select
-              style={{ width: "100%", marginTop: 8 }}
-              value={selectedModelId}
-              onChange={setSelectedModelId}
-              options={models.map((m) => ({
-                value: m.id,
-                label: `${m.name}${m.isLoaded ? "（已加载）" : ""}`,
-              }))}
-              placeholder="选择待评估模型"
-            />
-          </Col>
-          <Col xs={24} lg={8}>
-            <Typography.Text type="secondary">提示模板</Typography.Text>
-            <Select
-              style={{ width: "100%", marginTop: 8 }}
-              value={selectedPromptId}
-              onChange={setSelectedPromptId}
-              options={prompts.map((p) => ({ value: p.id, label: p.name }))}
-              placeholder="选择提示模板"
-            />
-          </Col>
-          <Col xs={24} lg={8}>
-            <Typography.Text type="secondary">
-              参与评估的原始合约
-            </Typography.Text>
-            <Select
-              mode="multiple"
-              style={{ width: "100%", marginTop: 8 }}
-              value={selectedContractIds}
-              onChange={setSelectedContractIds}
-              options={contracts.map((c) => ({ value: c.id, label: c.name }))}
-              placeholder="选择一批原始合约"
-              showSearch
-              optionFilterProp="label"
-            />
-          </Col>
-        </Row>
-
-        <Row gutter={16} style={{ marginTop: 16 }}>
-          <Col xs={24} lg={10}>
-            <Typography.Text type="secondary">扰动策略</Typography.Text>
-            <Select
-              mode="multiple"
-              style={{ width: "100%", marginTop: 8 }}
-              value={strategies}
-              onChange={setStrategies}
-              options={STRATEGY_OPTIONS}
-              placeholder="选择一种或多种扰动策略"
-            />
-          </Col>
-          <Col xs={24} lg={6}>
-            <Typography.Text type="secondary">
-              每份合约生成对抗样本数
-            </Typography.Text>
-            <InputNumber
-              min={1}
-              max={10}
-              value={variantsPerSource}
-              onChange={(v) => setVariantsPerSource(v || 1)}
-              style={{ width: "100%", marginTop: 8 }}
-            />
-          </Col>
-          <Col
-            xs={24}
-            lg={8}
-            style={{ display: "flex", alignItems: "flex-end" }}
-          >
-            <Button
-              type="primary"
-              onClick={() => void onStart()}
-              loading={loading}
-            >
-              启动鲁棒性评估
-            </Button>
-          </Col>
-        </Row>
-
-            <Divider style={{ margin: "16px 0" }} />
-
-            <Typography.Title level={5} style={{ marginTop: 0, marginBottom: 8 }}>
-          任务进度
-            </Typography.Title>
-            {currentJob ? (
-              <Space direction="vertical" size={8} style={{ width: "100%" }}>
-            <Typography.Text type="secondary">
-              当前任务：
-              <Typography.Text code>{currentJob.id}</Typography.Text>{" "}
-              <Tag
-                color={
-                  currentJob.status === "success"
-                    ? "green"
-                    : currentJob.status === "failed"
-                      ? "red"
-                      : "blue"
-                }
-              >
-                {currentJob.status}
-              </Tag>
-            </Typography.Text>
-            <Progress
-              percent={progressPercent}
-              size="small"
-              status={
-                currentJob.status === "failed"
-                  ? "exception"
-                  : currentJob.status === "success"
-                    ? "success"
-                    : "active"
-              }
-            />
-              </Space>
-            ) : (
-              <Typography.Text type="secondary">暂无鲁棒性评估任务</Typography.Text>
-            )}
-
-            <Divider style={{ margin: "16px 0" }} />
-
-            <Typography.Title level={5} style={{ marginTop: 0, marginBottom: 8 }}>
-          鲁棒性指标
-            </Typography.Title>
-            {metrics ? (
-              <Space direction="vertical" size={6} style={{ width: "100%" }}>
-            <Typography.Text>
-              对抗样本数：{metrics.totalAdversarial ?? "--"}，翻转次数：
-              {metrics.flipped ?? "--"}
-            </Typography.Text>
-            <Typography.Text>
-              预测翻转率（Flip Rate）：
-              <Typography.Text strong>{flipRateText}</Typography.Text>
-            </Typography.Text>
-            <Typography.Text>
-              平均置信度下降：
-              <Typography.Text strong>{avgDropText}</Typography.Text>
-            </Typography.Text>
-              </Space>
-            ) : (
-              <Typography.Text type="secondary">任务完成后将展示鲁棒性指标。</Typography.Text>
-            )}
-
-            {metrics ? (
-              <>
-            <Divider style={{ margin: "16px 0" }} />
-            <Row gutter={[16, 16]}>
-              <Col xs={24} lg={10}>
-                <Typography.Title
-                  level={5}
-                  style={{ marginTop: 0, marginBottom: 8 }}
-                >
-                  预测翻转占比
-                </Typography.Title>
-                <Card
-                  size="small"
-                  style={{ borderRadius: 12, background: "#fafafa" }}
-                >
-                  <Pie
-                    data={pieData}
-                    angleField="value"
-                    colorField="type"
-                    height={220}
-                    innerRadius={0.55}
-                    legend={{ position: "bottom" }}
-                    label={{
-                      type: "spider",
-                      content: (d: any) =>
-                        `${d.type} ${typeof d.percent === "number" ? (d.percent * 100).toFixed(1) : "--"}%`,
-                    }}
-                    interactions={[{ type: "element-active" }]}
-                  />
-                </Card>
+              <Col xs={24} lg={8}>
+                <Typography.Text type="secondary">模型</Typography.Text>
+                <Select
+                  style={{ width: "100%", marginTop: 8 }}
+                  value={selectedModelId}
+                  onChange={setSelectedModelId}
+                  options={models.map((m) => ({
+                    value: m.id,
+                    label: `${m.name}${m.isLoaded ? "（已加载）" : ""}`,
+                  }))}
+                  placeholder="选择待评估模型"
+                />
               </Col>
-              <Col xs={24} lg={14}>
-                <Typography.Title
-                  level={5}
-                  style={{ marginTop: 0, marginBottom: 8 }}
+              <Col xs={24} lg={8}>
+                <Typography.Text type="secondary">提示模板</Typography.Text>
+                <Select
+                  style={{ width: "100%", marginTop: 8 }}
+                  value={selectedPromptId}
+                  onChange={setSelectedPromptId}
+                  options={prompts.map((p) => ({ value: p.id, label: p.name }))}
+                  placeholder="选择提示模板"
+                />
+              </Col>
+              <Col xs={24} lg={8}>
+                <Typography.Text type="secondary">
+                  参与评估的原始合约
+                </Typography.Text>
+                <Select
+                  mode="multiple"
+                  style={{ width: "100%", marginTop: 8 }}
+                  value={selectedContractIds}
+                  onChange={setSelectedContractIds}
+                  options={contracts.map((c) => ({
+                    value: c.id,
+                    label: c.name,
+                  }))}
+                  placeholder="选择一批原始合约"
+                  showSearch
+                  optionFilterProp="label"
+                />
+              </Col>
+            </Row>
+
+            <Row gutter={16} style={{ marginTop: 16 }}>
+              <Col xs={24} lg={10}>
+                <Typography.Text type="secondary">扰动策略</Typography.Text>
+                <Select
+                  mode="multiple"
+                  style={{ width: "100%", marginTop: 8 }}
+                  value={strategies}
+                  onChange={setStrategies}
+                  options={STRATEGY_OPTIONS}
+                  placeholder="选择一种或多种扰动策略"
+                />
+              </Col>
+              <Col xs={24} lg={6}>
+                <Typography.Text type="secondary">
+                  每份合约生成对抗样本数
+                </Typography.Text>
+                <InputNumber
+                  min={1}
+                  max={10}
+                  value={variantsPerSource}
+                  onChange={(v) => setVariantsPerSource(v || 1)}
+                  style={{ width: "100%", marginTop: 8 }}
+                />
+              </Col>
+              <Col
+                xs={24}
+                lg={8}
+                style={{ display: "flex", alignItems: "flex-end" }}
+              >
+                <Button
+                  type="primary"
+                  onClick={() => void onStart()}
+                  loading={loading}
                 >
-                  按策略翻转情况
-                </Typography.Title>
-                <Card
-                  size="small"
-                  style={{ borderRadius: 12, background: "#fafafa" }}
-                >
-                  {strategyChartData.length ? (
-                    <Column
-                      data={strategyChartData}
-                      xField="strategy"
-                      yField="value"
-                      seriesField="kind"
-                      isStack
-                      height={220}
-                      xAxis={{ label: { autoHide: true, autoRotate: false } }}
-                      yAxis={{
-                        min: 0,
-                        tickCount: 6,
-                        title: { text: "样本数" },
-                      }}
-                      tooltip={{
-                        formatter: (d: any) => ({
-                          name: d.kind,
-                          value: `${d.value}（翻转率 ${d.flipRate}%）`,
-                        }),
-                      }}
-                    />
-                  ) : (
-                    <div
-                      style={{
-                        height: 220,
-                        display: "flex",
-                        alignItems: "center",
-                        justifyContent: "center",
-                      }}
-                    >
-                      <Empty
-                        image={Empty.PRESENTED_IMAGE_SIMPLE}
-                        description="暂无按策略明细（请重启后端后重新运行任务）"
-                      />
-                    </div>
-                  )}
-                </Card>
+                  启动鲁棒性评估
+                </Button>
               </Col>
             </Row>
 
             <Divider style={{ margin: "16px 0" }} />
+
             <Typography.Title
               level={5}
               style={{ marginTop: 0, marginBottom: 8 }}
             >
-              原始 vs 对抗对比明细
+              任务进度
             </Typography.Title>
-            <Table
-              rowKey="baseContractId"
-              size="small"
-              columns={contractColumns}
-              dataSource={perContractRows}
-              locale={{
-                emptyText: (
-                  <Empty
-                    image={Empty.PRESENTED_IMAGE_SIMPLE}
-                    description="暂无对比明细（请重启后端后重新运行任务）"
-                  />
-                ),
-              }}
-              pagination={{ pageSize: 6, hideOnSinglePage: true }}
-            />
+            {currentJob ? (
+              <Space direction="vertical" size={8} style={{ width: "100%" }}>
+                <Typography.Text type="secondary">
+                  当前任务：
+                  <Typography.Text code>{currentJob.id}</Typography.Text>{" "}
+                  <Tag
+                    color={
+                      currentJob.status === "success"
+                        ? "green"
+                        : currentJob.status === "failed"
+                          ? "red"
+                          : "blue"
+                    }
+                  >
+                    {currentJob.status}
+                  </Tag>
+                </Typography.Text>
+                <Progress
+                  percent={progressPercent}
+                  size="small"
+                  status={
+                    currentJob.status === "failed"
+                      ? "exception"
+                      : currentJob.status === "success"
+                        ? "success"
+                        : "active"
+                  }
+                />
+              </Space>
+            ) : (
+              <Typography.Text type="secondary">
+                暂无鲁棒性评估任务
+              </Typography.Text>
+            )}
+
+            <Divider style={{ margin: "16px 0" }} />
+
+            <Typography.Title
+              level={5}
+              style={{ marginTop: 0, marginBottom: 8 }}
+            >
+              鲁棒性指标
+            </Typography.Title>
+            {metrics ? (
+              <Space direction="vertical" size={6} style={{ width: "100%" }}>
+                <Typography.Text>
+                  对抗样本数：{metrics.totalAdversarial ?? "--"}，翻转次数：
+                  {metrics.flipped ?? "--"}
+                </Typography.Text>
+                <Typography.Text>
+                  预测翻转率（Flip Rate）：
+                  <Typography.Text strong>{flipRateText}</Typography.Text>
+                </Typography.Text>
+                <Typography.Text>
+                  平均置信度下降：
+                  <Typography.Text strong>{avgDropText}</Typography.Text>
+                </Typography.Text>
+              </Space>
+            ) : (
+              <Typography.Text type="secondary">
+                任务完成后将展示鲁棒性指标。
+              </Typography.Text>
+            )}
+
+            {metrics ? (
+              <>
+                <Divider style={{ margin: "16px 0" }} />
+                <Row gutter={[16, 16]}>
+                  <Col xs={24} lg={10}>
+                    <Typography.Title
+                      level={5}
+                      style={{ marginTop: 0, marginBottom: 8 }}
+                    >
+                      预测翻转占比
+                    </Typography.Title>
+                    <Card
+                      size="small"
+                      style={{ borderRadius: 12, background: "#fafafa" }}
+                    >
+                      <Pie
+                        data={pieData}
+                        angleField="value"
+                        colorField="type"
+                        height={220}
+                        innerRadius={0.55}
+                        legend={{ position: "bottom" }}
+                        label={{
+                          type: "spider",
+                          content: (d: any) =>
+                            `${d.type} ${typeof d.percent === "number" ? (d.percent * 100).toFixed(1) : "--"}%`,
+                        }}
+                        interactions={[{ type: "element-active" }]}
+                      />
+                    </Card>
+                  </Col>
+                  <Col xs={24} lg={14}>
+                    <Typography.Title
+                      level={5}
+                      style={{ marginTop: 0, marginBottom: 8 }}
+                    >
+                      按策略翻转情况
+                    </Typography.Title>
+                    <Card
+                      size="small"
+                      style={{ borderRadius: 12, background: "#fafafa" }}
+                    >
+                      {strategyChartData.length ? (
+                        <Column
+                          data={strategyChartData}
+                          xField="strategy"
+                          yField="value"
+                          seriesField="kind"
+                          isStack
+                          height={220}
+                          xAxis={{
+                            label: { autoHide: true, autoRotate: false },
+                          }}
+                          yAxis={{
+                            min: 0,
+                            tickCount: 6,
+                            title: { text: "样本数" },
+                          }}
+                          tooltip={{
+                            formatter: (d: any) => ({
+                              name: d.kind,
+                              value: `${d.value}（翻转率 ${d.flipRate}%）`,
+                            }),
+                          }}
+                        />
+                      ) : (
+                        <div
+                          style={{
+                            height: 220,
+                            display: "flex",
+                            alignItems: "center",
+                            justifyContent: "center",
+                          }}
+                        >
+                          <Empty
+                            image={Empty.PRESENTED_IMAGE_SIMPLE}
+                            description="暂无按策略明细（请重启后端后重新运行任务）"
+                          />
+                        </div>
+                      )}
+                    </Card>
+                  </Col>
+                </Row>
+
+                <Divider style={{ margin: "16px 0" }} />
+                <Typography.Title
+                  level={5}
+                  style={{ marginTop: 0, marginBottom: 8 }}
+                >
+                  原始 vs 对抗对比明细
+                </Typography.Title>
+                <Table
+                  rowKey="baseContractId"
+                  size="small"
+                  columns={contractColumns}
+                  dataSource={perContractRows}
+                  locale={{
+                    emptyText: (
+                      <Empty
+                        image={Empty.PRESENTED_IMAGE_SIMPLE}
+                        description="暂无对比明细（请重启后端后重新运行任务）"
+                      />
+                    ),
+                  }}
+                  pagination={{ pageSize: 6, hideOnSinglePage: true }}
+                />
               </>
             ) : null}
           </>

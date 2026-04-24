@@ -1,4 +1,19 @@
-node_modules
+# macOS
+.DS_Store
 
-# Python demo outputs (训练产物示例，不入库)
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+
+# Frontend / Node
+node_modules/
+frontend/dist/
+frontend/.vite/
+
+# Python training outputs
 python_scripts/demo_outputs/

@@ -68,6 +68,9 @@ export default function Training() {
     batchSize: number;
     learningRate: number;
     datasetRef: string;
+    baseModel: string;
+    maxLength: number;
+    seed: number;
   }>();
 
   const [prompts, setPrompts] = useState<Prompt[]>([]);
@@ -168,6 +171,9 @@ export default function Training() {
           epochs: v.epochs,
           batchSize: v.batchSize,
           learningRate: v.learningRate,
+          baseModel: v.baseModel,
+          maxLength: v.maxLength,
+          seed: v.seed,
         },
       });
       setCurrentJob(job);
@@ -256,8 +262,8 @@ export default function Training() {
               小样本训练
             </Typography.Title>
             <Typography.Text type="secondary">
-              在样本量≤64的条件下，基于选定的提示模板进行提示调优训练，并实时查看
-              loss/acc/F1 变化。
+              当前默认使用 CodeBERT 对本地数据集做真实微调训练，并实时记录
+              loss、acc、precision、recall、F1。
             </Typography.Text>
           </Col>
         </Row>
@@ -295,10 +301,13 @@ export default function Training() {
           requiredMark="optional"
           initialValues={{
             fewshotSize: 32,
-            epochs: 10,
-            batchSize: 8,
-            learningRate: 5e-5,
-            datasetRef: "demo",
+            epochs: 3,
+            batchSize: 4,
+            learningRate: 2e-5,
+            datasetRef: "smartbugs-curated",
+            baseModel: "microsoft/codebert-base",
+            maxLength: 256,
+            seed: 42,
           }}
         >
           <Row gutter={16}>
@@ -371,9 +380,42 @@ export default function Training() {
               <Form.Item
                 label="数据集标识"
                 name="datasetRef"
-                tooltip="当前使用后端内置数据集；后续可扩展为真实数据集配置或上传。"
+                tooltip="支持内置别名，或直接填写本地绝对路径。smartbugs-curated 已迁入仓库内 python_scripts/datasets。"
+                extra="可填 demo、smartbugs-curated，或本地绝对路径，例如 /Users/Shabix/Personal/sc-vuln-detector/python_scripts/datasets/smartbugs-curated"
               >
-                <Input placeholder="例如：demo / reentrancy-small" />
+                <Input placeholder="例如：smartbugs-curated 或 /Users/Shabix/Personal/sc-vuln-detector/python_scripts/datasets/smartbugs-curated" />
+              </Form.Item>
+            </Col>
+            <Col xs={24} lg={6}>
+              <Form.Item
+                label="基座模型"
+                name="baseModel"
+                extra="当前已验证 microsoft/codebert-base"
+              >
+                <Input placeholder="例如：microsoft/codebert-base" />
+              </Form.Item>
+            </Col>
+            <Col xs={24} lg={5}>
+              <Form.Item
+                label="最大长度"
+                name="maxLength"
+                rules={[{ required: true, message: "请输入最大长度" }]}
+              >
+                <InputNumber
+                  min={64}
+                  max={512}
+                  step={32}
+                  style={{ width: "100%" }}
+                />
+              </Form.Item>
+            </Col>
+            <Col xs={24} lg={5}>
+              <Form.Item
+                label="随机种子"
+                name="seed"
+                rules={[{ required: true, message: "请输入随机种子" }]}
+              >
+                <InputNumber min={1} max={999999} style={{ width: "100%" }} />
               </Form.Item>
             </Col>
           </Row>

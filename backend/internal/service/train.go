@@ -6,9 +6,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -87,17 +89,25 @@ func (t *Trainer) runPython(jobID string) {
 		return
 	}
 
-	epochs, batchSize, lr := parseParams(job.ParamsJSON)
+	epochs, batchSize, lr, baseModel, maxLength, seed, valRatio := parseParams(job.ParamsJSON)
 	datasetPath := datasetRefToPath(job.DatasetRef)
+	if datasetPath == "" {
+		t.failJob(jobID, fmt.Errorf("无法解析数据集: %s", job.DatasetRef))
+		return
+	}
 
 	cmd := exec.Command(
-		"python3",
+		pythonExecutable(),
 		filepath.ToSlash(filepath.Join("..", "python_scripts", "train_demo.py")),
 		"--job_id", jobID,
 		"--fewshot_size", strconv.Itoa(job.FewshotSize),
 		"--epochs", strconv.Itoa(epochs),
 		"--batch_size", strconv.Itoa(batchSize),
 		"--learning_rate", fmt.Sprintf("%g", lr),
+		"--base_model", baseModel,
+		"--max_length", strconv.Itoa(maxLength),
+		"--seed", strconv.Itoa(seed),
+		"--val_ratio", fmt.Sprintf("%g", valRatio),
 		"--out_dir", filepath.ToSlash(filepath.Join("..", "python_scripts", "demo_outputs")),
 	)
 	if prompt.TemplateText != "" {
@@ -163,6 +173,7 @@ func (t *Trainer) runPython(jobID string) {
 
 	artifact := ""
 	best := map[string]any{}
+	baseModelName := baseModel
 	if summary != nil {
 		if v, ok := summary["artifact"].(string); ok {
 			artifact = v
@@ -170,14 +181,17 @@ func (t *Trainer) runPython(jobID string) {
 		if v, ok := summary["best"].(map[string]any); ok {
 			best = v
 		}
+		if v, ok := summary["base_model"].(string); ok && strings.TrimSpace(v) != "" {
+			baseModelName = v
+		}
 	}
 
 	metricsJSON, _ := json.Marshal(best)
 	modelRec := &model.TrainedModel{
 		ID:          uuid.NewString(),
 		TrainJobID:  jobID,
-		Name:        "DemoModel-" + time.Now().Format("150405"),
-		BaseModel:   "codebert",
+		Name:        "CodeBERT-" + time.Now().Format("150405"),
+		BaseModel:   baseModelName,
 		PromptID:    job.PromptID,
 		Artifact:    artifact,
 		MetricsJSON: string(metricsJSON),
@@ -199,10 +213,14 @@ func (t *Trainer) runPython(jobID string) {
 	}
 }
 
-func parseParams(paramsJSON string) (epochs int, batchSize int, lr float64) {
+func parseParams(paramsJSON string) (epochs int, batchSize int, lr float64, baseModel string, maxLength int, seed int, valRatio float64) {
 	epochs = 10
 	batchSize = 8
 	lr = 5e-5
+	baseModel = "microsoft/codebert-base"
+	maxLength = 256
+	seed = 42
+	valRatio = 0.2
 	if paramsJSON == "" {
 		return
 	}
@@ -219,6 +237,20 @@ func parseParams(paramsJSON string) (epochs int, batchSize int, lr float64) {
 	if v, ok := m["learningRate"]; ok {
 		lr = toFloat(v)
 	}
+	if v, ok := m["baseModel"]; ok {
+		if s, ok := v.(string); ok && strings.TrimSpace(s) != "" {
+			baseModel = strings.TrimSpace(s)
+		}
+	}
+	if v, ok := m["maxLength"]; ok {
+		maxLength = toInt(v)
+	}
+	if v, ok := m["seed"]; ok {
+		seed = toInt(v)
+	}
+	if v, ok := m["valRatio"]; ok {
+		valRatio = toFloat(v)
+	}
 	if epochs <= 0 {
 		epochs = 10
 	}
@@ -228,15 +260,58 @@ func parseParams(paramsJSON string) (epochs int, batchSize int, lr float64) {
 	if lr <= 0 {
 		lr = 5e-5
 	}
+	if maxLength <= 0 {
+		maxLength = 256
+	}
+	if seed <= 0 {
+		seed = 42
+	}
+	if valRatio <= 0 || valRatio >= 0.5 {
+		valRatio = 0.2
+	}
 	return
 }
 
 func datasetRefToPath(ref string) string {
-	if ref == "" || ref == "demo" {
+	trimmed := strings.TrimSpace(ref)
+	if trimmed == "" || trimmed == "demo" {
 		return filepath.ToSlash(filepath.Join("..", "python_scripts", "datasets", "demo.jsonl"))
 	}
-	// 预留：后续可以扩展为从数据库/上传目录解析真实数据集路径
+	if trimmed == "smartbugs-curated" || trimmed == "smartbugs-3class" {
+		return filepath.ToSlash(filepath.Join("..", "python_scripts", "datasets", "smartbugs-curated"))
+	}
+	if filepath.IsAbs(trimmed) {
+		if _, err := os.Stat(trimmed); err == nil {
+			return trimmed
+		}
+		return ""
+	}
+	if strings.HasPrefix(trimmed, "local:") {
+		p := strings.TrimSpace(strings.TrimPrefix(trimmed, "local:"))
+		if filepath.IsAbs(p) {
+			if _, err := os.Stat(p); err == nil {
+				return p
+			}
+		}
+	}
 	return ""
+}
+
+func pythonExecutable() string {
+	candidates := []string{
+		filepath.ToSlash(filepath.Join("..", ".venv", "bin", "python")),
+		filepath.ToSlash(filepath.Join(".venv", "bin", "python")),
+		"python3",
+	}
+	for _, candidate := range candidates {
+		if candidate == "python3" {
+			return candidate
+		}
+		if _, err := os.Stat(candidate); err == nil {
+			return candidate
+		}
+	}
+	return "python3"
 }
 
 func toInt(v any) int {
@@ -301,4 +376,3 @@ func (t *Trainer) failJob(jobID string, err error) {
 			"error":       err.Error(),
 		}).Error
 }
-

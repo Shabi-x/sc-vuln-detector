@@ -13,6 +13,7 @@ import {
   Table,
   Tag,
   Tabs,
+  Tooltip,
   Typography,
   message,
 } from "antd";
@@ -285,12 +286,40 @@ export default function Robustness() {
     {
       title: "合约",
       dataIndex: "contractName",
+      width: 180,
       render: (v: string, r) => (
-        <Space size={8}>
-          <Typography.Text strong>{v}</Typography.Text>
-          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-            {r.baseContractId}
-          </Typography.Text>
+        <Space direction="vertical" size={2} style={{ width: "100%" }}>
+          <Tooltip title={v}>
+            <Typography.Text
+              strong
+              style={{
+                maxWidth: 140,
+                display: "inline-block",
+                whiteSpace: "nowrap",
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+                verticalAlign: "bottom",
+              }}
+            >
+              {v}
+            </Typography.Text>
+          </Tooltip>
+          <Tooltip title={r.baseContractId}>
+            <Typography.Text
+              type="secondary"
+              style={{
+                fontSize: 12,
+                maxWidth: 140,
+                display: "inline-block",
+                whiteSpace: "nowrap",
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+                verticalAlign: "bottom",
+              }}
+            >
+              {r.baseContractId}
+            </Typography.Text>
+          </Tooltip>
         </Space>
       ),
     },

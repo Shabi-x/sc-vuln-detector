@@ -17,27 +17,57 @@ export type RobustJob = {
 }
 
 export type RobustMetrics = {
+  targetVulnType?: string
+  attackPipeline?: string[]
+  attackableContracts?: number
   totalAdversarial?: number
-  flipped?: number
-  flipRate?: number
+  attackSuccesses?: number
+  attackSuccessRate?: number
+  origAccuracy?: number
+  advAccuracy?: number
+  accuracyDropRate?: number
   avgConfidenceDrop?: number
   perStrategy?: Array<{
     strategy: string
-    total: number
-    flipped: number
-    flipRate: number
+    totalVariants: number
+    attackSuccesses: number
+    attackSuccessRate: number
     avgConfidenceDrop: number
+    avgCoreFragmentsHidden: number
   }>
   perContract?: Array<{
     baseContractId: string
     contractName: string
     origLabel: string
     origConfidence: number
+    origVulnScore: number
+    attackable: boolean
+    skippedReason?: string
+    coreFragments?: Array<{
+      index: number
+      lineNumber: number
+      content: string
+      sensitivity: number
+      vulnScore: number
+      label: string
+    }>
     advTotal: number
     flipped: number
     avgAdvConfidence: number
     avgConfDrop: number
-    byStrategy?: Record<string, { total: number; flipped: number; avgConfDrop: number }>
+    bestAttackStrategy?: string
+    bestAttackSample?: {
+      variantIndex: number
+      fragmentsUsed: Array<{
+        lineNumber: number
+        content: string
+        sensitivity: number
+      }>
+      opaqueGuards: string[]
+      wrapperNames: string[]
+      attackSucceeded: boolean
+    }
+    byStrategy?: Record<string, { total: number; attackSuccesses: number; attackSuccessRate: number; avgConfDrop: number }>
   }>
   [key: string]: unknown
 }
@@ -65,4 +95,3 @@ export async function listRobustJobs() {
   const { data } = await http.get<RobustJob[]>('/api/robust/jobs')
   return data
 }
-

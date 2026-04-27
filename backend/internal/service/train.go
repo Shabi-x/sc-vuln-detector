@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -29,10 +30,10 @@ func NewTrainer(db *gorm.DB) *Trainer {
 }
 
 type TrainRequest struct {
-	PromptID    string                 `json:"promptId"`
-	FewshotSize int                    `json:"fewshotSize"`
-	Params      map[string]any         `json:"params"`
-	DatasetRef  string                 `json:"datasetRef"`
+	PromptID    string         `json:"promptId"`
+	FewshotSize int            `json:"fewshotSize"`
+	Params      map[string]any `json:"params"`
+	DatasetRef  string         `json:"datasetRef"`
 }
 
 // CreateJob 创建训练任务并启动异步模拟训练。
@@ -89,10 +90,14 @@ func (t *Trainer) runPython(jobID string) {
 		return
 	}
 
-	epochs, batchSize, lr, baseModel, maxLength, seed, valRatio := parseParams(job.ParamsJSON)
+	epochs, batchSize, lr, baseModel, maxLength, seed, valRatio, targetVulnType := parseParams(job.ParamsJSON)
 	datasetPath := datasetRefToPath(job.DatasetRef)
 	if datasetPath == "" {
 		t.failJob(jobID, fmt.Errorf("无法解析数据集: %s", job.DatasetRef))
+		return
+	}
+	if targetVulnType == "" {
+		t.failJob(jobID, fmt.Errorf("未指定目标漏洞类型"))
 		return
 	}
 
@@ -108,6 +113,7 @@ func (t *Trainer) runPython(jobID string) {
 		"--max_length", strconv.Itoa(maxLength),
 		"--seed", strconv.Itoa(seed),
 		"--val_ratio", fmt.Sprintf("%g", valRatio),
+		"--target_vuln_type", targetVulnType,
 		"--out_dir", filepath.ToSlash(filepath.Join("..", "python_scripts", "demo_outputs")),
 	)
 	if prompt.TemplateText != "" {
@@ -190,7 +196,7 @@ func (t *Trainer) runPython(jobID string) {
 	modelRec := &model.TrainedModel{
 		ID:          uuid.NewString(),
 		TrainJobID:  jobID,
-		Name:        "CodeBERT-" + time.Now().Format("150405"),
+		Name:        buildModelName(baseModelName, targetVulnType, job.FewshotSize, epochs, time.Now()),
 		BaseModel:   baseModelName,
 		PromptID:    job.PromptID,
 		Artifact:    artifact,
@@ -213,7 +219,7 @@ func (t *Trainer) runPython(jobID string) {
 	}
 }
 
-func parseParams(paramsJSON string) (epochs int, batchSize int, lr float64, baseModel string, maxLength int, seed int, valRatio float64) {
+func parseParams(paramsJSON string) (epochs int, batchSize int, lr float64, baseModel string, maxLength int, seed int, valRatio float64, targetVulnType string) {
 	epochs = 10
 	batchSize = 8
 	lr = 5e-5
@@ -221,6 +227,7 @@ func parseParams(paramsJSON string) (epochs int, batchSize int, lr float64, base
 	maxLength = 256
 	seed = 42
 	valRatio = 0.2
+	targetVulnType = "reentrancy"
 	if paramsJSON == "" {
 		return
 	}
@@ -251,6 +258,11 @@ func parseParams(paramsJSON string) (epochs int, batchSize int, lr float64, base
 	if v, ok := m["valRatio"]; ok {
 		valRatio = toFloat(v)
 	}
+	if v, ok := m["targetVulnType"]; ok {
+		if s, ok := v.(string); ok && strings.TrimSpace(s) != "" {
+			targetVulnType = sanitizeNameToken(s)
+		}
+	}
 	if epochs <= 0 {
 		epochs = 10
 	}
@@ -268,6 +280,9 @@ func parseParams(paramsJSON string) (epochs int, batchSize int, lr float64, base
 	}
 	if valRatio <= 0 || valRatio >= 0.5 {
 		valRatio = 0.2
+	}
+	if targetVulnType == "" {
+		targetVulnType = "reentrancy"
 	}
 	return
 }
@@ -312,6 +327,55 @@ func pythonExecutable() string {
 		}
 	}
 	return "python3"
+}
+
+func buildModelName(baseModel string, targetVulnType string, fewshotSize int, epochs int, createdAt time.Time) string {
+	modelPart := normalizeBaseModelName(baseModel)
+	targetPart := sanitizeNameToken(targetVulnType)
+	if targetPart == "" {
+		targetPart = "vulnerability"
+	}
+	if fewshotSize <= 0 {
+		fewshotSize = 1
+	}
+	if epochs <= 0 {
+		epochs = 1
+	}
+	return fmt.Sprintf(
+		"%s-%s-fs%d-e%d-%s",
+		modelPart,
+		targetPart,
+		fewshotSize,
+		epochs,
+		createdAt.Format("20060102-150405"),
+	)
+}
+
+func normalizeBaseModelName(baseModel string) string {
+	trimmed := strings.TrimSpace(strings.ToLower(baseModel))
+	if trimmed == "" {
+		return "model"
+	}
+	parts := strings.Split(trimmed, "/")
+	last := parts[len(parts)-1]
+	last = strings.TrimSuffix(last, "-base")
+	last = strings.TrimSuffix(last, "-small")
+	last = strings.TrimSuffix(last, "-large")
+	last = sanitizeNameToken(last)
+	if last == "" {
+		return "model"
+	}
+	return last
+}
+
+func sanitizeNameToken(value string) string {
+	re := regexp.MustCompile(`[^a-z0-9]+`)
+	sanitized := re.ReplaceAllString(strings.ToLower(strings.TrimSpace(value)), "-")
+	sanitized = strings.Trim(sanitized, "-")
+	if sanitized == "" {
+		return "item"
+	}
+	return sanitized
 }
 
 func toInt(v any) int {

@@ -7,6 +7,17 @@ export type TrainJobStatus =
   | 'failed'
   | 'canceled'
 
+export type TargetVulnType = 'reentrancy' | 'access_control' | 'arithmetic'
+
+export const TARGET_VULN_OPTIONS: Array<{
+  label: string
+  value: TargetVulnType
+}> = [
+  { label: '重入漏洞', value: 'reentrancy' },
+  { label: '访问控制漏洞', value: 'access_control' },
+  { label: '整数算术漏洞', value: 'arithmetic' },
+]
+
 export type TrainJob = {
   id: string
   promptId: string
@@ -41,6 +52,7 @@ export type TrainedModel = {
   artifact: string
   metricsJson: string
   isLoaded: boolean
+  targetVulnType?: TargetVulnType | ''
   createdAt: string
   updatedAt: string
 }
@@ -76,4 +88,3 @@ export async function loadModel(id: string) {
   const { data } = await http.post<{ ok: boolean; loadedId: string }>(`/api/models/${id}/load`)
   return data
 }
-

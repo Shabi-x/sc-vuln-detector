@@ -1,8 +1,11 @@
 package handlers
 
 import (
+	"encoding/json"
 	"net/http"
 	"strconv"
+	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -26,6 +29,20 @@ type createTrainJobRequest struct {
 	FewshotSize int                    `json:"fewshotSize" binding:"required"`
 	DatasetRef  string                 `json:"datasetRef"`
 	Params      map[string]interface{} `json:"params"`
+}
+
+type trainedModelDTO struct {
+	ID             string    `json:"id"`
+	TrainJobID     string    `json:"trainJobId"`
+	Name           string    `json:"name"`
+	BaseModel      string    `json:"baseModel"`
+	PromptID       string    `json:"promptId"`
+	Artifact       string    `json:"artifact"`
+	MetricsJSON    string    `json:"metricsJson"`
+	IsLoaded       bool      `json:"isLoaded"`
+	TargetVulnType string    `json:"targetVulnType"`
+	CreatedAt      time.Time `json:"createdAt"`
+	UpdatedAt      time.Time `json:"updatedAt"`
 }
 
 // POST /api/train/jobs
@@ -108,7 +125,47 @@ func (h *TrainHandlers) ListModels(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"message": "查询失败", "error": err.Error()})
 		return
 	}
-	c.JSON(http.StatusOK, models)
+
+	jobIDs := make([]string, 0, len(models))
+	for _, m := range models {
+		if strings.TrimSpace(m.TrainJobID) != "" {
+			jobIDs = append(jobIDs, m.TrainJobID)
+		}
+	}
+
+	targetByJobID := map[string]string{}
+	if len(jobIDs) > 0 {
+		var jobs []model.TrainJob
+		if err := h.DB.Where("id IN ?", jobIDs).Find(&jobs).Error; err == nil {
+			for _, job := range jobs {
+				var params map[string]any
+				if err := json.Unmarshal([]byte(job.ParamsJSON), &params); err != nil {
+					continue
+				}
+				if v, ok := params["targetVulnType"].(string); ok && strings.TrimSpace(v) != "" {
+					targetByJobID[job.ID] = strings.TrimSpace(v)
+				}
+			}
+		}
+	}
+
+	resp := make([]trainedModelDTO, 0, len(models))
+	for _, m := range models {
+		resp = append(resp, trainedModelDTO{
+			ID:             m.ID,
+			TrainJobID:     m.TrainJobID,
+			Name:           m.Name,
+			BaseModel:      m.BaseModel,
+			PromptID:       m.PromptID,
+			Artifact:       m.Artifact,
+			MetricsJSON:    m.MetricsJSON,
+			IsLoaded:       m.IsLoaded,
+			TargetVulnType: targetByJobID[m.TrainJobID],
+			CreatedAt:      m.CreatedAt,
+			UpdatedAt:      m.UpdatedAt,
+		})
+	}
+	c.JSON(http.StatusOK, resp)
 }
 
 // POST /api/models/:id/load
@@ -138,4 +195,3 @@ func (h *TrainHandlers) LoadModel(c *gin.Context) {
 func newID() string {
 	return uuid.NewString()
 }
-

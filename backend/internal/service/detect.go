@@ -1,10 +1,14 @@
 package service
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"math"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -44,6 +48,17 @@ type DetectOutput struct {
 	ElapsedMS    int          `json:"elapsedMs"`
 }
 
+type modelInferenceResult struct {
+	Label        string             `json:"label"`
+	LabelName    string             `json:"label_name"`
+	Confidence   float64            `json:"confidence"`
+	VulnType     string             `json:"vuln_type"`
+	MatchedToken string             `json:"matched_token"`
+	TopK         []TokenScore       `json:"top_k"`
+	Scores       map[string]float64 `json:"scores"`
+	ElapsedMS    int                `json:"elapsed_ms"`
+}
+
 func (d *Detector) DetectOne(ctx context.Context, req DetectRequest) (*DetectOutput, string, error) {
 	if d.DB == nil {
 		return nil, "", gorm.ErrInvalidDB
@@ -52,57 +67,25 @@ func (d *Detector) DetectOne(ctx context.Context, req DetectRequest) (*DetectOut
 		return nil, "", fmt.Errorf("contractId 和 promptId 必填")
 	}
 
-	modelID, err := d.resolveModelID(ctx, strings.TrimSpace(req.ModelID))
+	ct, prompt, trainedModel, err := d.loadDetectContext(ctx, strings.TrimSpace(req.ContractID), strings.TrimSpace(req.PromptID), strings.TrimSpace(req.ModelID))
 	if err != nil {
 		return nil, "", err
 	}
 
-	var ct model.Contract
-	if err := d.DB.WithContext(ctx).First(&ct, "id = ?", strings.TrimSpace(req.ContractID)).Error; err != nil {
+	result, err := d.runModelInference(trainedModel.Artifact, ct.ProcessedSource, prompt.TemplateText)
+	if err != nil {
 		return nil, "", err
-	}
-	var prompt model.Prompt
-	if err := d.DB.WithContext(ctx).First(&prompt, "id = ?", strings.TrimSpace(req.PromptID)).Error; err != nil {
-		return nil, "", err
-	}
-	var mappings []model.PromptMapping
-	if err := d.DB.WithContext(ctx).Where("prompt_id = ?", prompt.ID).Find(&mappings).Error; err != nil {
-		return nil, "", err
-	}
-	if len(mappings) == 0 {
-		return nil, "", fmt.Errorf("该模板未配置标签词映射")
 	}
 
-	start := time.Now()
-	topK, matchedToken, label, confidence, vulnType := inferByHeuristic(ct.ProcessedSource, mappings)
-	elapsed := int(time.Since(start).Milliseconds())
-
-	topKJSON, _ := json.Marshal(topK)
-	rec := &model.DetectResult{
-		ID:           uuid.NewString(),
-		ContractID:   ct.ID,
-		ModelID:      modelID,
-		PromptID:     prompt.ID,
-		Label:        label,
-		Confidence:   confidence,
-		VulnType:     vulnType,
-		MatchedToken: matchedToken,
-		TopKJSON:     string(topKJSON),
-		ElapsedMS:    elapsed,
+	output, rec, err := buildDetectPersistence(ct.ID, "", prompt.ID, trainedModel.ID, result)
+	if err != nil {
+		return nil, "", err
 	}
 	if err := d.DB.WithContext(ctx).Create(rec).Error; err != nil {
 		return nil, "", err
 	}
 
-	return &DetectOutput{
-		ContractID:   ct.ID,
-		Label:        label,
-		Confidence:   confidence,
-		VulnType:     vulnType,
-		MatchedToken: matchedToken,
-		TopK:         topK,
-		ElapsedMS:    elapsed,
-	}, modelID, nil
+	return output, trainedModel.ID, nil
 }
 
 func (d *Detector) CreateBatchJob(ctx context.Context, promptID, modelID string, contractIDs []string) (*model.DetectJob, error) {
@@ -154,63 +137,58 @@ func (d *Detector) runBatch(jobID string) {
 		d.failJob(jobID, fmt.Errorf("解析任务参数失败: %w", err))
 		return
 	}
+
 	var prompt model.Prompt
 	if err := d.DB.WithContext(ctx).First(&prompt, "id = ?", job.PromptID).Error; err != nil {
 		d.failJob(jobID, err)
 		return
 	}
-	var mappings []model.PromptMapping
-	if err := d.DB.WithContext(ctx).Where("prompt_id = ?", prompt.ID).Find(&mappings).Error; err != nil {
-		d.failJob(jobID, err)
-		return
-	}
-	if len(mappings) == 0 {
-		d.failJob(jobID, fmt.Errorf("该模板未配置标签词映射"))
+
+	var trainedModel model.TrainedModel
+	if err := d.DB.WithContext(ctx).First(&trainedModel, "id = ?", job.ModelID).Error; err != nil {
+		d.failJob(jobID, fmt.Errorf("模型不存在"))
 		return
 	}
 
 	var success, failed int
 	labelStats := map[model.Label]int{}
 	vulnTypeStats := map[string]int{}
+
 	for _, cid := range p.ContractIDs {
 		var ct model.Contract
 		if err := d.DB.WithContext(ctx).First(&ct, "id = ?", cid).Error; err != nil {
 			failed++
 			continue
 		}
-		start := time.Now()
-		topK, matchedToken, label, confidence, vulnType := inferByHeuristic(ct.ProcessedSource, mappings)
-		elapsed := int(time.Since(start).Milliseconds())
-		topKJSON, _ := json.Marshal(topK)
-		rec := &model.DetectResult{
-			ID:           uuid.NewString(),
-			JobID:        jobID,
-			ContractID:   ct.ID,
-			ModelID:      job.ModelID,
-			PromptID:     prompt.ID,
-			Label:        label,
-			Confidence:   confidence,
-			VulnType:     vulnType,
-			MatchedToken: matchedToken,
-			TopKJSON:     string(topKJSON),
-			ElapsedMS:    elapsed,
+
+		result, err := d.runModelInference(trainedModel.Artifact, ct.ProcessedSource, prompt.TemplateText)
+		if err != nil {
+			failed++
+			continue
+		}
+
+		_, rec, err := buildDetectPersistence(ct.ID, job.ID, prompt.ID, trainedModel.ID, result)
+		if err != nil {
+			failed++
+			continue
 		}
 		if err := d.DB.WithContext(ctx).Create(rec).Error; err != nil {
 			failed++
 			continue
 		}
-		labelStats[label]++
-		if vulnType != "" {
-			vulnTypeStats[vulnType]++
+
+		labelStats[rec.Label]++
+		if rec.VulnType != "" {
+			vulnTypeStats[rec.VulnType]++
 		}
 		success++
 	}
 
 	resultBytes, _ := json.Marshal(map[string]any{
-		"total":        len(p.ContractIDs),
-		"success":      success,
-		"failed":       failed,
-		"labelStats":   labelStats,
+		"total":         len(p.ContractIDs),
+		"success":       success,
+		"failed":        failed,
+		"labelStats":    labelStats,
 		"vulnTypeStats": vulnTypeStats,
 	})
 	finish := time.Now()
@@ -220,6 +198,110 @@ func (d *Detector) runBatch(jobID string) {
 			"result_json": string(resultBytes),
 			"finished_at": finish,
 		}).Error
+}
+
+func (d *Detector) loadDetectContext(ctx context.Context, contractID, promptID, modelID string) (*model.Contract, *model.Prompt, *model.TrainedModel, error) {
+	resolvedModelID, err := d.resolveModelID(ctx, modelID)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	var ct model.Contract
+	if err := d.DB.WithContext(ctx).First(&ct, "id = ?", contractID).Error; err != nil {
+		return nil, nil, nil, err
+	}
+	var prompt model.Prompt
+	if err := d.DB.WithContext(ctx).First(&prompt, "id = ?", promptID).Error; err != nil {
+		return nil, nil, nil, err
+	}
+	var trainedModel model.TrainedModel
+	if err := d.DB.WithContext(ctx).First(&trainedModel, "id = ?", resolvedModelID).Error; err != nil {
+		return nil, nil, nil, fmt.Errorf("模型不存在")
+	}
+	return &ct, &prompt, &trainedModel, nil
+}
+
+func (d *Detector) runModelInference(artifactPath, source, promptText string) (*modelInferenceResult, error) {
+	modelDir, err := resolveArtifactPath(artifactPath)
+	if err != nil {
+		return nil, err
+	}
+
+	cmd := exec.Command(
+		pythonExecutable(),
+		filepath.ToSlash(filepath.Join("..", "python_scripts", "infer_demo.py")),
+		"--model_dir", modelDir,
+	)
+	if strings.TrimSpace(promptText) != "" {
+		cmd.Args = append(cmd.Args, "--prompt_text", promptText)
+	}
+	cmd.Stdin = strings.NewReader(source)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+
+	output, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("模型推理失败: %w; stderr=%s", err, strings.TrimSpace(stderr.String()))
+	}
+
+	var result modelInferenceResult
+	if err := json.Unmarshal(output, &result); err != nil {
+		return nil, fmt.Errorf("解析模型推理结果失败: %w; stdout=%s; stderr=%s", err, strings.TrimSpace(string(output)), strings.TrimSpace(stderr.String()))
+	}
+	return &result, nil
+}
+
+func buildDetectPersistence(contractID, jobID, promptID, modelID string, result *modelInferenceResult) (*DetectOutput, *model.DetectResult, error) {
+	if result == nil {
+		return nil, nil, fmt.Errorf("empty model inference result")
+	}
+
+	detectLabel := model.Label(result.Label)
+	if detectLabel != model.LabelVulnerable && detectLabel != model.LabelNonVulnerable {
+		return nil, nil, fmt.Errorf("unsupported detect label: %s", result.Label)
+	}
+
+	topKJSON, _ := json.Marshal(result.TopK)
+	rec := &model.DetectResult{
+		ID:           uuid.NewString(),
+		JobID:        jobID,
+		ContractID:   contractID,
+		ModelID:      modelID,
+		PromptID:     promptID,
+		Label:        detectLabel,
+		Confidence:   result.Confidence,
+		VulnType:     result.VulnType,
+		MatchedToken: result.MatchedToken,
+		TopKJSON:     string(topKJSON),
+		ElapsedMS:    result.ElapsedMS,
+	}
+	output := &DetectOutput{
+		ContractID:   contractID,
+		Label:        detectLabel,
+		Confidence:   result.Confidence,
+		VulnType:     result.VulnType,
+		MatchedToken: result.MatchedToken,
+		TopK:         result.TopK,
+		ElapsedMS:    result.ElapsedMS,
+	}
+	return output, rec, nil
+}
+
+func resolveArtifactPath(artifact string) (string, error) {
+	candidates := []string{
+		strings.TrimSpace(artifact),
+		strings.TrimPrefix(strings.TrimSpace(artifact), "../"),
+	}
+	for _, candidate := range candidates {
+		if candidate == "" {
+			continue
+		}
+		cleaned := filepath.Clean(candidate)
+		if _, err := os.Stat(cleaned); err == nil {
+			return cleaned, nil
+		}
+	}
+	return "", fmt.Errorf("模型产物不存在: %s", artifact)
 }
 
 func (d *Detector) resolveModelID(ctx context.Context, explicitID string) (string, error) {

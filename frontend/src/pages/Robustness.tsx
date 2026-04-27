@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Button,
   Card,
@@ -28,31 +28,57 @@ import {
   type RobustJob,
   type RobustMetrics,
 } from "../services/robust";
+import { getPageCache, setPageCache } from "../utils/pageCache";
 
 const STRATEGY_OPTIONS = [
-  { label: "标识符改名", value: "rename-identifiers" },
-  { label: "插入死代码", value: "insert-dead-code" },
-  { label: "触发词注入", value: "trigger-injection" },
+  { label: "调用链隐藏黑盒攻击", value: "call-chain-hiding" },
 ];
+const ROBUSTNESS_CACHE_KEY = "page:robustness";
 
 export default function Robustness() {
-  const [activeTab, setActiveTab] = useState<"run" | "history">("run");
+  const cachedState = getPageCache<{
+    activeTab?: "run" | "history";
+    selectedContractIds?: string[];
+    selectedPromptId?: string;
+    selectedModelId?: string;
+    strategies?: string[];
+    variantsPerSource?: number;
+    currentJob?: RobustJob | null;
+    metrics?: RobustMetrics | null;
+  }>(ROBUSTNESS_CACHE_KEY);
+
+  const [activeTab, setActiveTab] = useState<"run" | "history">(
+    cachedState?.activeTab ?? "run",
+  );
   const [contracts, setContracts] = useState<ContractSummary[]>([]);
   const [prompts, setPrompts] = useState<Prompt[]>([]);
   const [models, setModels] = useState<TrainedModel[]>([]);
   const [historyJobs, setHistoryJobs] = useState<RobustJob[]>([]);
 
-  const [selectedContractIds, setSelectedContractIds] = useState<string[]>([]);
-  const [selectedPromptId, setSelectedPromptId] = useState<string>();
-  const [selectedModelId, setSelectedModelId] = useState<string>();
+  const [selectedContractIds, setSelectedContractIds] = useState<string[]>(
+    cachedState?.selectedContractIds ?? [],
+  );
+  const [selectedPromptId, setSelectedPromptId] = useState<string | undefined>(
+    cachedState?.selectedPromptId,
+  );
+  const [selectedModelId, setSelectedModelId] = useState<string | undefined>(
+    cachedState?.selectedModelId,
+  );
   const [strategies, setStrategies] = useState<string[]>([
-    "rename-identifiers",
+    ...(cachedState?.strategies ?? ["call-chain-hiding"]),
   ]);
-  const [variantsPerSource, setVariantsPerSource] = useState(1);
+  const [variantsPerSource, setVariantsPerSource] = useState(
+    cachedState?.variantsPerSource ?? 1,
+  );
 
   const [loading, setLoading] = useState(false);
-  const [currentJob, setCurrentJob] = useState<RobustJob | null>(null);
-  const [metrics, setMetrics] = useState<RobustMetrics | null>(null);
+  const [currentJob, setCurrentJob] = useState<RobustJob | null>(
+    cachedState?.currentJob ?? null,
+  );
+  const [metrics, setMetrics] = useState<RobustMetrics | null>(
+    cachedState?.metrics ?? null,
+  );
+  const pollTimerRef = useRef<number | null>(null);
 
   useEffect(() => {
     const init = async () => {
@@ -85,6 +111,41 @@ export default function Robustness() {
     void init();
   }, []);
 
+  useEffect(() => {
+    setPageCache(ROBUSTNESS_CACHE_KEY, {
+      activeTab,
+      selectedContractIds,
+      selectedPromptId,
+      selectedModelId,
+      strategies,
+      variantsPerSource,
+      currentJob,
+      metrics,
+    });
+  }, [
+    activeTab,
+    selectedContractIds,
+    selectedPromptId,
+    selectedModelId,
+    strategies,
+    variantsPerSource,
+    currentJob,
+    metrics,
+  ]);
+
+  useEffect(() => {
+    if (!currentJob || (currentJob.status !== "queued" && currentJob.status !== "running")) {
+      return;
+    }
+    pollJob(currentJob.id);
+    return () => {
+      if (pollTimerRef.current !== null) {
+        window.clearTimeout(pollTimerRef.current);
+        pollTimerRef.current = null;
+      }
+    };
+  }, [currentJob?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+
   const refreshHistory = async () => {
     try {
       const hs = await listRobustJobs();
@@ -97,13 +158,17 @@ export default function Robustness() {
   };
 
   const pollJob = (jobId: string) => {
+    if (pollTimerRef.current !== null) {
+      window.clearTimeout(pollTimerRef.current);
+      pollTimerRef.current = null;
+    }
     const tick = async () => {
       try {
         const data = await getRobustJob(jobId);
         setCurrentJob(data.job);
         setMetrics(data.metrics ?? null);
         if (data.job.status === "queued" || data.job.status === "running") {
-          setTimeout(tick, 1000);
+          pollTimerRef.current = window.setTimeout(tick, 1000);
         }
       } catch (e) {
         message.error(
@@ -160,9 +225,13 @@ export default function Robustness() {
     return 100;
   }, [currentJob]);
 
-  const flipRateText =
-    metrics && typeof metrics.flipRate === "number"
-      ? `${(metrics.flipRate * 100).toFixed(2)}%`
+  const attackSuccessRateText =
+    metrics && typeof metrics.attackSuccessRate === "number"
+      ? `${(metrics.attackSuccessRate * 100).toFixed(2)}%`
+      : "--";
+  const accuracyDropRateText =
+    metrics && typeof metrics.accuracyDropRate === "number"
+      ? `${(metrics.accuracyDropRate * 100).toFixed(2)}%`
       : "--";
   const avgDropText =
     metrics && typeof metrics.avgConfidenceDrop === "number"
@@ -171,33 +240,32 @@ export default function Robustness() {
 
   const pieData = useMemo(() => {
     if (!metrics?.totalAdversarial) return [];
-    const flipped = metrics.flipped ?? 0;
+    const flipped = metrics.attackSuccesses ?? 0;
     const stable = Math.max(0, metrics.totalAdversarial - flipped);
     return [
-      { type: "预测翻转", value: flipped },
-      { type: "预测一致", value: stable },
+      { type: "攻击成功", value: flipped },
+      { type: "攻击未成功", value: stable },
     ];
   }, [metrics]);
 
-  // 用“翻转/一致”的堆叠柱状图呈现，避免 flipRate=0 时柱子高度为 0 看起来像空白
   const strategyChartData = useMemo(() => {
     const arr = metrics?.perStrategy ?? [];
     return arr.flatMap((s) => {
-      const total = s.total ?? 0;
-      const flipped = s.flipped ?? 0;
+      const total = s.totalVariants ?? 0;
+      const flipped = s.attackSuccesses ?? 0;
       const stable = Math.max(0, total - flipped);
       return [
         {
           strategy: s.strategy,
-          kind: "预测一致",
+          kind: "攻击未成功",
           value: stable,
-          flipRate: Math.round((s.flipRate ?? 0) * 10000) / 100,
+          successRate: Math.round((s.attackSuccessRate ?? 0) * 10000) / 100,
         },
         {
           strategy: s.strategy,
-          kind: "预测翻转",
+          kind: "攻击成功",
           value: flipped,
-          flipRate: Math.round((s.flipRate ?? 0) * 10000) / 100,
+          successRate: Math.round((s.attackSuccessRate ?? 0) * 10000) / 100,
         },
       ];
     });
@@ -250,6 +318,24 @@ export default function Robustness() {
       dataIndex: "flipped",
       width: 110,
       render: (v: number) => <Typography.Text>{v}</Typography.Text>,
+    },
+    {
+      title: "核心脆弱代码",
+      width: 280,
+      render: (_, r) =>
+        r.coreFragments?.length ? (
+          <Space direction="vertical" size={2}>
+            {r.coreFragments.slice(0, 3).map((fragment) => (
+              <Typography.Text key={`${r.baseContractId}-${fragment.lineNumber}`} type="secondary">
+                L{fragment.lineNumber} {fragment.content}
+              </Typography.Text>
+            ))}
+          </Space>
+        ) : (
+          <Typography.Text type="secondary">
+            {r.skippedReason || "--"}
+          </Typography.Text>
+        ),
     },
     {
       title: "对抗平均置信度",
@@ -340,7 +426,7 @@ export default function Robustness() {
               对抗攻击与鲁棒性
             </Typography.Title>
             <Typography.Text type="secondary">
-              围绕同一批合约生成对抗样本，在相同模型与提示配置下比较原始与扰动版本的预测差异，评估模型鲁棒性。
+              按“核心脆弱代码搜索 → 虚假调用链替换 → 不可达路径隐藏”的黑盒攻击流程生成对抗样本，并评估目标漏洞检测模型的鲁棒性。
             </Typography.Text>
           </Col>
         </Row>
@@ -403,19 +489,19 @@ export default function Robustness() {
 
             <Row gutter={16} style={{ marginTop: 16 }}>
               <Col xs={24} lg={10}>
-                <Typography.Text type="secondary">扰动策略</Typography.Text>
+                <Typography.Text type="secondary">攻击策略</Typography.Text>
                 <Select
                   mode="multiple"
                   style={{ width: "100%", marginTop: 8 }}
                   value={strategies}
                   onChange={setStrategies}
                   options={STRATEGY_OPTIONS}
-                  placeholder="选择一种或多种扰动策略"
+                  placeholder="选择攻击策略"
                 />
               </Col>
               <Col xs={24} lg={6}>
                 <Typography.Text type="secondary">
-                  每份合约生成对抗样本数
+                  每份合约生成攻击变体数
                 </Typography.Text>
                 <InputNumber
                   min={1}
@@ -494,12 +580,17 @@ export default function Robustness() {
             {metrics ? (
               <Space direction="vertical" size={6} style={{ width: "100%" }}>
                 <Typography.Text>
-                  对抗样本数：{metrics.totalAdversarial ?? "--"}，翻转次数：
-                  {metrics.flipped ?? "--"}
+                  攻击目标漏洞：{metrics.targetVulnType ?? "--"}，可攻击样本：
+                  {metrics.attackableContracts ?? "--"}，对抗样本数：
+                  {metrics.totalAdversarial ?? "--"}
                 </Typography.Text>
                 <Typography.Text>
-                  预测翻转率（Flip Rate）：
-                  <Typography.Text strong>{flipRateText}</Typography.Text>
+                  攻击成功率：
+                  <Typography.Text strong>{attackSuccessRateText}</Typography.Text>
+                </Typography.Text>
+                <Typography.Text>
+                  准确率下降比率：
+                  <Typography.Text strong>{accuracyDropRateText}</Typography.Text>
                 </Typography.Text>
                 <Typography.Text>
                   平均置信度下降：
@@ -521,7 +612,7 @@ export default function Robustness() {
                       level={5}
                       style={{ marginTop: 0, marginBottom: 8 }}
                     >
-                      预测翻转占比
+                      攻击成功占比
                     </Typography.Title>
                     <Card
                       size="small"
@@ -548,7 +639,7 @@ export default function Robustness() {
                       level={5}
                       style={{ marginTop: 0, marginBottom: 8 }}
                     >
-                      按策略翻转情况
+                      按策略攻击成功情况
                     </Typography.Title>
                     <Card
                       size="small"
@@ -570,13 +661,13 @@ export default function Robustness() {
                             tickCount: 6,
                             title: { text: "样本数" },
                           }}
-                          tooltip={{
-                            formatter: (d: any) => ({
-                              name: d.kind,
-                              value: `${d.value}（翻转率 ${d.flipRate}%）`,
-                            }),
-                          }}
-                        />
+                            tooltip={{
+                              formatter: (d: any) => ({
+                                name: d.kind,
+                                value: `${d.value}（成功率 ${d.successRate}%）`,
+                              }),
+                            }}
+                          />
                       ) : (
                         <div
                           style={{
@@ -600,8 +691,8 @@ export default function Robustness() {
                 <Typography.Title
                   level={5}
                   style={{ marginTop: 0, marginBottom: 8 }}
-                >
-                  原始 vs 对抗对比明细
+                    >
+                  原始样本与调用链隐藏攻击明细
                 </Typography.Title>
                 <Table
                   rowKey="baseContractId"

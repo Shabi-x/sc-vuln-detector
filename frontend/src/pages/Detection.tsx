@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Button,
   Card,
@@ -18,7 +18,6 @@ import {
 import type { ColumnsType } from "antd/es/table";
 import { listContracts, type ContractSummary } from "../services/contracts";
 import {
-  listPromptMappings,
   listPrompts,
   type Label,
   type Prompt,
@@ -32,8 +31,10 @@ import {
   type DetectJob,
   type DetectResult,
 } from "../services/detection";
+import { getPageCache, setPageCache } from "../utils/pageCache";
 
 type Mode = "single" | "batch";
+const DETECTION_CACHE_KEY = "page:detection";
 
 const labelText: Record<Label, string> = {
   vulnerable: "有漏洞",
@@ -41,21 +42,46 @@ const labelText: Record<Label, string> = {
 };
 
 export default function Detection() {
-  const [mode, setMode] = useState<Mode>("single");
+  const cachedState = getPageCache<{
+    mode?: Mode;
+    selectedPromptId?: string;
+    selectedModelId?: string;
+    selectedContractId?: string;
+    selectedContractIds?: string[];
+    singleResult?: DetectResult | null;
+    currentJob?: DetectJob | null;
+    batchResults?: BatchDetectResult[];
+  }>(DETECTION_CACHE_KEY);
+
+  const [mode, setMode] = useState<Mode>(cachedState?.mode ?? "single");
   const [loading, setLoading] = useState(false);
   const [contracts, setContracts] = useState<ContractSummary[]>([]);
   const [prompts, setPrompts] = useState<Prompt[]>([]);
   const [models, setModels] = useState<TrainedModel[]>([]);
 
-  const [selectedPromptId, setSelectedPromptId] = useState<string>();
-  const [selectedModelId, setSelectedModelId] = useState<string>();
-  const [selectedContractId, setSelectedContractId] = useState<string>();
-  const [selectedContractIds, setSelectedContractIds] = useState<string[]>([]);
+  const [selectedPromptId, setSelectedPromptId] = useState<string | undefined>(
+    cachedState?.selectedPromptId,
+  );
+  const [selectedModelId, setSelectedModelId] = useState<string | undefined>(
+    cachedState?.selectedModelId,
+  );
+  const [selectedContractId, setSelectedContractId] = useState<string | undefined>(
+    cachedState?.selectedContractId,
+  );
+  const [selectedContractIds, setSelectedContractIds] = useState<string[]>(
+    cachedState?.selectedContractIds ?? [],
+  );
 
-  const [singleResult, setSingleResult] = useState<DetectResult | null>(null);
-  const [currentJob, setCurrentJob] = useState<DetectJob | null>(null);
-  const [batchResults, setBatchResults] = useState<BatchDetectResult[]>([]);
-  const [mappingCount, setMappingCount] = useState(0);
+  const [singleResult, setSingleResult] = useState<DetectResult | null>(
+    cachedState?.singleResult ?? null,
+  );
+  const [currentJob, setCurrentJob] = useState<DetectJob | null>(
+    cachedState?.currentJob ?? null,
+  );
+  const [batchResults, setBatchResults] = useState<BatchDetectResult[]>(
+    cachedState?.batchResults ?? [],
+  );
+  const pollTimerRef = useRef<number | null>(null);
 
   const loadedModel = useMemo(
     () => models.find((m) => m.isLoaded) ?? null,
@@ -105,20 +131,39 @@ export default function Detection() {
   }, []);
 
   useEffect(() => {
-    const loadMappings = async () => {
-      if (!selectedPromptId) {
-        setMappingCount(0);
-        return;
-      }
-      try {
-        const mappings = await listPromptMappings(selectedPromptId);
-        setMappingCount(mappings.length);
-      } catch {
-        setMappingCount(0);
+    setPageCache(DETECTION_CACHE_KEY, {
+      mode,
+      selectedPromptId,
+      selectedModelId,
+      selectedContractId,
+      selectedContractIds,
+      singleResult,
+      currentJob,
+      batchResults,
+    });
+  }, [
+    mode,
+    selectedPromptId,
+    selectedModelId,
+    selectedContractId,
+    selectedContractIds,
+    singleResult,
+    currentJob,
+    batchResults,
+  ]);
+
+  useEffect(() => {
+    if (!currentJob || (currentJob.status !== "queued" && currentJob.status !== "running")) {
+      return;
+    }
+    pollBatchJob(currentJob.id);
+    return () => {
+      if (pollTimerRef.current !== null) {
+        window.clearTimeout(pollTimerRef.current);
+        pollTimerRef.current = null;
       }
     };
-    void loadMappings();
-  }, [selectedPromptId]);
+  }, [currentJob?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const getErrMsg = (e: unknown) => {
     if (typeof e === "object" && e !== null) {
@@ -132,13 +177,17 @@ export default function Detection() {
   };
 
   const pollBatchJob = (jobId: string) => {
+    if (pollTimerRef.current !== null) {
+      window.clearTimeout(pollTimerRef.current);
+      pollTimerRef.current = null;
+    }
     const tick = async () => {
       try {
         const data = await getDetectBatchJob(jobId);
         setCurrentJob(data.job);
         setBatchResults(data.results);
         if (data.job.status === "queued" || data.job.status === "running") {
-          setTimeout(tick, 1000);
+          pollTimerRef.current = window.setTimeout(tick, 1000);
         }
       } catch (e) {
         message.error(
@@ -152,12 +201,6 @@ export default function Detection() {
   const onDetectSingle = async () => {
     if (!selectedContractId || !selectedPromptId) {
       message.warning("请先选择合约与提示模板");
-      return;
-    }
-    if (mappingCount === 0) {
-      message.warning(
-        "当前模板未配置标签词映射，请先到“提示模板-标签词映射”中添加",
-      );
       return;
     }
     try {
@@ -179,12 +222,6 @@ export default function Detection() {
   const onDetectBatch = async () => {
     if (!selectedPromptId || selectedContractIds.length === 0) {
       message.warning("请先选择模板和待测合约");
-      return;
-    }
-    if (mappingCount === 0) {
-      message.warning(
-        "当前模板未配置标签词映射，请先到“提示模板-标签词映射”中添加",
-      );
       return;
     }
     try {
@@ -327,7 +364,7 @@ export default function Detection() {
               漏洞检测
             </Typography.Title>
             <Typography.Text type="secondary">
-              使用已加载模型和提示模板，对预处理合约执行单份或批量漏洞检测并输出置信度结果。
+              使用已训练的目标漏洞二分类模型，对预处理合约执行单份或批量检测并输出是否存在目标漏洞的置信度结果。
             </Typography.Text>
           </Col>
         </Row>
@@ -421,7 +458,7 @@ export default function Detection() {
                       {labelText[singleResult.label]}
                     </Tag>
                     <Tag>置信度 {singleResult.confidence.toFixed(4)}</Tag>
-                    <Tag>命中 token: {singleResult.matchedToken || "--"}</Tag>
+                    <Tag>预测标签: {singleResult.matchedToken || "--"}</Tag>
                     {singleResult.vulnType ? (
                       <Tag color="orange">{singleResult.vulnType}</Tag>
                     ) : null}
@@ -535,8 +572,7 @@ export default function Detection() {
 
         <Divider style={{ margin: "16px 0 0" }} />
         <Typography.Text type="secondary">
-          当前模板：{selectedPrompt?.name || "--"}；映射数量：{mappingCount}
-          ；当前已加载模型：
+          当前模板：{selectedPrompt?.name || "--"}；当前已加载模型：
           {loadedModel?.name || "未加载"}
         </Typography.Text>
       </Card>

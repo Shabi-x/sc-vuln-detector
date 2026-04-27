@@ -21,32 +21,35 @@ ALLOWED_SMARTBUGS_CATEGORIES = {
     "access_control": "access_control",
     "arithmetic": "arithmetic",
 }
+POSITIVE_LABEL = "vulnerable"
+NEGATIVE_LABEL = "non_vulnerable"
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser()
-    p.add_argument("--job_id", required=True)
-    p.add_argument("--prompt_text", help="硬提示模板内容，可选")
-    p.add_argument("--fewshot_size", type=int, default=32)
-    p.add_argument("--epochs", type=int, default=5)
-    p.add_argument("--batch_size", type=int, default=8)
-    p.add_argument("--learning_rate", type=float, default=2e-5)
-    p.add_argument("--base_model", default="microsoft/codebert-base")
-    p.add_argument("--max_length", type=int, default=256)
-    p.add_argument("--seed", type=int, default=42)
-    p.add_argument("--val_ratio", type=float, default=0.2)
-    p.add_argument(
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--job_id", required=True)
+    parser.add_argument("--prompt_text", help="硬提示模板内容，可选")
+    parser.add_argument("--fewshot_size", type=int, default=32)
+    parser.add_argument("--epochs", type=int, default=5)
+    parser.add_argument("--batch_size", type=int, default=8)
+    parser.add_argument("--learning_rate", type=float, default=2e-5)
+    parser.add_argument("--base_model", default="microsoft/codebert-base")
+    parser.add_argument("--max_length", type=int, default=256)
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--val_ratio", type=float, default=0.2)
+    parser.add_argument("--target_vuln_type", default="reentrancy")
+    parser.add_argument(
         "--dataset_path",
         type=Path,
         help="支持 JSONL 文件或 smartbugs-curated 目录，建议放在 python_scripts/datasets 下",
     )
-    p.add_argument(
+    parser.add_argument(
         "--out_dir",
         type=Path,
         default=Path("python_scripts/demo_outputs"),
         help="用于保存训练指标和模型产物的目录",
     )
-    return p.parse_args()
+    return parser.parse_args()
 
 
 def set_seed(seed: int) -> None:
@@ -57,10 +60,14 @@ def set_seed(seed: int) -> None:
         torch.cuda.manual_seed_all(seed)
 
 
+def normalize_vuln_type(label_name: str) -> str:
+    return label_name.strip().lower().replace(" ", "_").replace("-", "_")
+
+
 def load_jsonl_dataset(path: Path) -> list[dict[str, Any]]:
     data: list[dict[str, Any]] = []
-    with path.open("r", encoding="utf-8") as f:
-        for line in f:
+    with path.open("r", encoding="utf-8") as handle:
+        for line in handle:
             line = line.strip()
             if not line:
                 continue
@@ -109,7 +116,7 @@ def load_dataset(path: Path) -> list[dict[str, Any]]:
         normalized: list[dict[str, Any]] = []
         for row in rows:
             label_name = row.get("vuln_type") or row.get("label_name")
-            if not label_name:
+            if label_name is None:
                 label_value = row.get("label")
                 label_name = str(label_value)
             normalized.append(
@@ -125,11 +132,40 @@ def load_dataset(path: Path) -> list[dict[str, Any]]:
     raise ValueError(f"unsupported dataset format: {path}")
 
 
-def split_dataset(rows: list[dict[str, Any]], fewshot_size: int, val_ratio: float) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, int], dict[str, int]]:
+def prepare_binary_dataset(rows: list[dict[str, Any]], target_vuln_type: str) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    target = normalize_vuln_type(target_vuln_type)
+    binary_rows: list[dict[str, Any]] = []
+    class_counts = {POSITIVE_LABEL: 0, NEGATIVE_LABEL: 0}
+
+    for row in rows:
+        original_label = normalize_vuln_type(str(row["label_name"]))
+        label_name = POSITIVE_LABEL if original_label == target else NEGATIVE_LABEL
+        class_counts[label_name] += 1
+        binary_rows.append(
+            {
+                **row,
+                "original_label_name": original_label,
+                "label_name": label_name,
+                "target_vuln_type": target,
+            }
+        )
+
+    if class_counts[POSITIVE_LABEL] == 0:
+        raise ValueError(f"target vulnerability has no samples: {target}")
+    if class_counts[NEGATIVE_LABEL] == 0:
+        raise ValueError("binary dataset has no negative samples")
+
+    return binary_rows, class_counts
+
+
+def split_dataset(
+    rows: list[dict[str, Any]],
+    fewshot_size: int,
+    val_ratio: float,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, int], dict[str, int]]:
     buckets: dict[str, list[dict[str, Any]]] = {}
     for row in rows:
-        key = str(row["label_name"])
-        buckets.setdefault(key, []).append(row)
+        buckets.setdefault(str(row["label_name"]), []).append(row)
 
     train_rows: list[dict[str, Any]] = []
     val_rows: list[dict[str, Any]] = []
@@ -156,9 +192,8 @@ def split_dataset(rows: list[dict[str, Any]], fewshot_size: int, val_ratio: floa
     return train_rows, val_rows, train_counts, val_counts
 
 
-def build_label_mapping(rows: list[dict[str, Any]]) -> dict[str, int]:
-    labels = sorted({str(row["label_name"]) for row in rows})
-    return {label: index for index, label in enumerate(labels)}
+def build_label_mapping() -> dict[str, int]:
+    return {NEGATIVE_LABEL: 0, POSITIVE_LABEL: 1}
 
 
 def render_text(source: str, prompt_text: str | None, mask_token: str) -> str:
@@ -178,35 +213,47 @@ def choose_device() -> str:
     return "cpu"
 
 
+def load_base_model(base_model: str, label_map: dict[str, int]) -> tuple[Any, Any]:
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(base_model, local_files_only=True)
+        model = AutoModelForSequenceClassification.from_pretrained(
+            base_model,
+            num_labels=len(label_map),
+            id2label={index: label for label, index in label_map.items()},
+            label2id=label_map,
+            local_files_only=True,
+        )
+        return tokenizer, model
+    except Exception as exc:  # pragma: no cover - environment dependent
+        raise RuntimeError(
+            f"failed to load base model '{base_model}' from local cache; "
+            "please ensure the model is downloaded before offline training"
+        ) from exc
+
+
 def safe_div(numerator: float, denominator: float) -> float:
     if denominator == 0:
         return 0.0
     return numerator / denominator
 
 
-def compute_metrics(y_true: list[int], y_pred: list[int], label_count: int) -> dict[str, float]:
-    correct = sum(1 for t, p in zip(y_true, y_pred) if t == p)
+def compute_metrics(y_true: list[int], y_pred: list[int], positive_label: int) -> dict[str, float]:
+    correct = sum(1 for truth, pred in zip(y_true, y_pred) if truth == pred)
     acc = safe_div(correct, len(y_true))
 
-    precisions: list[float] = []
-    recalls: list[float] = []
-    f1s: list[float] = []
-    for label in range(label_count):
-        tp = sum(1 for t, p in zip(y_true, y_pred) if t == label and p == label)
-        fp = sum(1 for t, p in zip(y_true, y_pred) if t != label and p == label)
-        fn = sum(1 for t, p in zip(y_true, y_pred) if t == label and p != label)
-        precision = safe_div(tp, tp + fp)
-        recall = safe_div(tp, tp + fn)
-        f1 = safe_div(2 * precision * recall, precision + recall) if (precision + recall) > 0 else 0.0
-        precisions.append(precision)
-        recalls.append(recall)
-        f1s.append(f1)
+    tp = sum(1 for truth, pred in zip(y_true, y_pred) if truth == positive_label and pred == positive_label)
+    fp = sum(1 for truth, pred in zip(y_true, y_pred) if truth != positive_label and pred == positive_label)
+    fn = sum(1 for truth, pred in zip(y_true, y_pred) if truth == positive_label and pred != positive_label)
+
+    precision = safe_div(tp, tp + fp)
+    recall = safe_div(tp, tp + fn)
+    f1 = safe_div(2 * precision * recall, precision + recall) if (precision + recall) > 0 else 0.0
 
     return {
         "acc": acc,
-        "precision": float(np.mean(precisions)) if precisions else 0.0,
-        "recall": float(np.mean(recalls)) if recalls else 0.0,
-        "f1": float(np.mean(f1s)) if f1s else 0.0,
+        "precision": precision,
+        "recall": recall,
+        "f1": f1,
     }
 
 
@@ -258,20 +305,20 @@ class SolidityDataset(Dataset[EncodedExample]):
         }
 
 
-def evaluate(model: nn.Module, loader: DataLoader[dict[str, torch.Tensor]], device: str, label_count: int) -> dict[str, float]:
+def evaluate(model: nn.Module, loader: DataLoader[dict[str, torch.Tensor]], device: str, positive_label: int) -> dict[str, float]:
     model.eval()
     losses: list[float] = []
     y_true: list[int] = []
     y_pred: list[int] = []
     with torch.no_grad():
         for batch in loader:
-            batch = {k: v.to(device) for k, v in batch.items()}
+            batch = {key: value.to(device) for key, value in batch.items()}
             outputs = model(**batch)
             losses.append(float(outputs.loss.item()))
             preds = torch.argmax(outputs.logits, dim=-1)
             y_true.extend(batch["labels"].cpu().tolist())
             y_pred.extend(preds.cpu().tolist())
-    metrics = compute_metrics(y_true, y_pred, label_count)
+    metrics = compute_metrics(y_true, y_pred, positive_label)
     metrics["loss"] = float(np.mean(losses)) if losses else 0.0
     return metrics
 
@@ -288,20 +335,16 @@ def main() -> None:
     if not dataset_rows:
         raise ValueError("dataset is empty")
 
-    label_map = build_label_mapping(dataset_rows)
-    train_rows, val_rows, train_counts, val_counts = split_dataset(dataset_rows, args.fewshot_size, args.val_ratio)
+    target_vuln_type = normalize_vuln_type(args.target_vuln_type)
+    binary_rows, class_counts = prepare_binary_dataset(dataset_rows, target_vuln_type)
+    label_map = build_label_mapping()
+    train_rows, val_rows, train_counts, val_counts = split_dataset(binary_rows, args.fewshot_size, args.val_ratio)
     if not train_rows:
         raise ValueError("training split is empty")
     if not val_rows:
         val_rows = train_rows
 
-    tokenizer = AutoTokenizer.from_pretrained(args.base_model)
-    model = AutoModelForSequenceClassification.from_pretrained(
-        args.base_model,
-        num_labels=len(label_map),
-        id2label={index: label for label, index in label_map.items()},
-        label2id=label_map,
-    )
+    tokenizer, model = load_base_model(args.base_model, label_map)
 
     device = choose_device()
     model.to(device)
@@ -322,11 +365,12 @@ def main() -> None:
     artifact_dir.mkdir(parents=True, exist_ok=True)
 
     metric_history: list[dict[str, Any]] = []
+    positive_label_id = label_map[POSITIVE_LABEL]
     for epoch in range(1, args.epochs + 1):
         model.train()
         batch_losses: list[float] = []
         for batch in train_loader:
-            batch = {k: v.to(device) for k, v in batch.items()}
+            batch = {key: value.to(device) for key, value in batch.items()}
             optimizer.zero_grad()
             outputs = model(**batch)
             loss = outputs.loss
@@ -335,7 +379,7 @@ def main() -> None:
             scheduler.step()
             batch_losses.append(float(loss.item()))
 
-        eval_metrics = evaluate(model, val_loader, device, len(label_map))
+        eval_metrics = evaluate(model, val_loader, device, positive_label_id)
         epoch_summary = {
             "epoch": epoch,
             "loss": eval_metrics["loss"],
@@ -363,6 +407,9 @@ def main() -> None:
                         "max_length": args.max_length,
                         "seed": args.seed,
                         "device": device,
+                        "target_vuln_type": target_vuln_type,
+                        "negative_strategy": "one-vs-rest",
+                        "raw_class_counts": class_counts,
                         "train_counts": train_counts,
                         "val_counts": val_counts,
                     },
@@ -384,11 +431,6 @@ def main() -> None:
         encoding="utf-8",
     )
 
-    dataset_class_counts: dict[str, int] = {}
-    for row in dataset_rows:
-        label_name = str(row["label_name"])
-        dataset_class_counts[label_name] = dataset_class_counts.get(label_name, 0) + 1
-
     summary = {
         "job_id": args.job_id,
         "artifact": str(artifact_dir),
@@ -402,12 +444,14 @@ def main() -> None:
         "max_length": args.max_length,
         "seed": args.seed,
         "device": device,
+        "target_vuln_type": target_vuln_type,
         "dataset": {
             "path": str(args.dataset_path),
-            "total": len(dataset_rows),
+            "total": len(binary_rows),
+            "positiveTotal": class_counts[POSITIVE_LABEL],
+            "negativeTotal": class_counts[NEGATIVE_LABEL],
             "train": len(train_rows),
             "val": len(val_rows),
-            "classes": dataset_class_counts,
             "trainClasses": train_counts,
             "valClasses": val_counts,
         },

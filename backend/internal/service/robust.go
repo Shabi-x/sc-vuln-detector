@@ -4,6 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
+	"os"
+	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -11,6 +15,10 @@ import (
 	"gorm.io/gorm"
 
 	"sc-vuln-detector/backend/internal/model"
+)
+
+const (
+	RobustStrategyCallChainHiding = "call-chain-hiding"
 )
 
 type RobustService struct {
@@ -30,6 +38,65 @@ type RobustEvaluateRequest struct {
 	VariantsPerSrc int      `json:"variantsPerSource"`
 }
 
+type robustConfig struct {
+	ContractIDs       []string `json:"contractIds"`
+	Strategies        []string `json:"strategies"`
+	VariantsPerSource int      `json:"variantsPerSource"`
+}
+
+type modelArtifactMetadata struct {
+	TargetVulnType string         `json:"target_vuln_type"`
+	LabelMap       map[string]int `json:"label_map"`
+	PromptText     *string        `json:"prompt_text"`
+	MaxLength      int            `json:"max_length"`
+	RawClassCounts map[string]int `json:"raw_class_counts"`
+	TrainCounts    map[string]int `json:"train_counts"`
+	ValCounts      map[string]int `json:"val_counts"`
+	Extra          map[string]any `json:"-"`
+}
+
+type robustCoreFragment struct {
+	Index       int     `json:"index"`
+	LineNumber  int     `json:"lineNumber"`
+	Content     string  `json:"content"`
+	Sensitivity float64 `json:"sensitivity"`
+	VulnScore   float64 `json:"vulnScore"`
+	Label       string  `json:"label"`
+}
+
+type robustAttackSample struct {
+	VariantIndex    int                  `json:"variantIndex"`
+	FragmentsUsed   []robustCoreFragment `json:"fragmentsUsed"`
+	OpaqueGuards    []string             `json:"opaqueGuards"`
+	WrapperNames    []string             `json:"wrapperNames"`
+	AttackSucceeded bool                 `json:"attackSucceeded"`
+}
+
+type robustPerContract struct {
+	BaseContractID     string               `json:"baseContractId"`
+	ContractName       string               `json:"contractName"`
+	OrigLabel          model.Label          `json:"origLabel"`
+	OrigConfidence     float64              `json:"origConfidence"`
+	OrigVulnScore      float64              `json:"origVulnScore"`
+	Attackable         bool                 `json:"attackable"`
+	SkippedReason      string               `json:"skippedReason"`
+	CoreFragments      []robustCoreFragment `json:"coreFragments"`
+	AdvTotal           int                  `json:"advTotal"`
+	Flipped            int                  `json:"flipped"`
+	AvgAdvConfidence   float64              `json:"avgAdvConfidence"`
+	AvgConfDrop        float64              `json:"avgConfDrop"`
+	BestAttackStrategy string               `json:"bestAttackStrategy"`
+	BestAttackSample   *robustAttackSample  `json:"bestAttackSample,omitempty"`
+	ByStrategy         map[string]any       `json:"byStrategy"`
+}
+
+type robustStrategyAgg struct {
+	TotalVariants      int     `json:"totalVariants"`
+	AttackSuccesses    int     `json:"attackSuccesses"`
+	ConfidenceDropSum  float64 `json:"confidenceDropSum"`
+	CoreFragmentsTotal int     `json:"coreFragmentsTotal"`
+}
+
 // CreateJob 创建鲁棒性评估任务并异步执行
 func (s *RobustService) CreateJob(ctx context.Context, req RobustEvaluateRequest) (*model.RobustJob, error) {
 	if s.DB == nil || s.Detector == nil {
@@ -42,16 +109,19 @@ func (s *RobustService) CreateJob(ctx context.Context, req RobustEvaluateRequest
 		return nil, fmt.Errorf("contractIds 不能为空")
 	}
 	if len(req.Strategies) == 0 {
-		req.Strategies = []string{"rename-identifiers"}
+		req.Strategies = []string{RobustStrategyCallChainHiding}
 	}
 	if req.VariantsPerSrc <= 0 {
 		req.VariantsPerSrc = 1
 	}
+	if req.VariantsPerSrc > 5 {
+		req.VariantsPerSrc = 5
+	}
 
-	confBytes, _ := json.Marshal(map[string]any{
-		"contractIds":       req.ContractIDs,
-		"strategies":        req.Strategies,
-		"variantsPerSource": req.VariantsPerSrc,
+	confBytes, _ := json.Marshal(robustConfig{
+		ContractIDs:       req.ContractIDs,
+		Strategies:        req.Strategies,
+		VariantsPerSource: req.VariantsPerSrc,
 	})
 
 	job := &model.RobustJob{
@@ -66,7 +136,6 @@ func (s *RobustService) CreateJob(ctx context.Context, req RobustEvaluateRequest
 	}
 
 	go s.run(job.ID)
-
 	return job, nil
 }
 
@@ -89,40 +158,33 @@ func (s *RobustService) run(jobID string) {
 		return
 	}
 
-	// 校验模型存在（本版本仍为启发式推理，但保持“模型维度”一致，便于后续替换为真实推理）
-	var mdl model.TrainedModel
-	if err := s.DB.WithContext(ctx).First(&mdl, "id = ?", job.ModelID).Error; err != nil {
+	var trainedModel model.TrainedModel
+	if err := s.DB.WithContext(ctx).First(&trainedModel, "id = ?", job.ModelID).Error; err != nil {
 		s.fail(jobID, fmt.Errorf("模型不存在"))
 		return
 	}
 
-	// 加载 prompt 与映射（verbalizer）
 	var prompt model.Prompt
 	if err := s.DB.WithContext(ctx).First(&prompt, "id = ?", job.PromptID).Error; err != nil {
 		s.fail(jobID, fmt.Errorf("提示模板不存在"))
 		return
 	}
-	var mappings []model.PromptMapping
-	if err := s.DB.WithContext(ctx).Where("prompt_id = ?", prompt.ID).Find(&mappings).Error; err != nil {
+
+	meta, err := s.loadModelMetadata(trainedModel.Artifact)
+	if err != nil {
 		s.fail(jobID, err)
 		return
 	}
-	if len(mappings) == 0 {
-		s.fail(jobID, fmt.Errorf("该模板未配置标签词映射"))
-		return
-	}
 
-	var cfg struct {
-		ContractIDs       []string `json:"contractIds"`
-		Strategies        []string `json:"strategies"`
-		VariantsPerSource int      `json:"variantsPerSource"`
-	}
+	var cfg robustConfig
 	if err := json.Unmarshal([]byte(job.AttackConfigJSON), &cfg); err != nil {
 		s.fail(jobID, fmt.Errorf("解析任务配置失败: %w", err))
 		return
 	}
+	if len(cfg.Strategies) == 0 {
+		cfg.Strategies = []string{RobustStrategyCallChainHiding}
+	}
 
-	// 1) 加载原始合约
 	var contracts []model.Contract
 	if err := s.DB.WithContext(ctx).Find(&contracts, "id IN ?", cfg.ContractIDs).Error; err != nil {
 		s.fail(jobID, fmt.Errorf("加载合约失败: %w", err))
@@ -133,191 +195,466 @@ func (s *RobustService) run(jobID string) {
 		return
 	}
 
-	// 为避免对抗样本记录无限膨胀：清理本次涉及合约 + 策略 的旧对抗样本。
-	// 需求上仍然“记录入库”，但默认只保留最新一轮，便于演示与管理。
 	baseIDs := make([]string, 0, len(contracts))
-	for _, c := range contracts {
-		baseIDs = append(baseIDs, c.ID)
+	for _, contract := range contracts {
+		baseIDs = append(baseIDs, contract.ID)
 	}
-	if len(baseIDs) > 0 && len(cfg.Strategies) > 0 {
-		_ = s.DB.WithContext(ctx).
-			Where("base_contract_id IN ? AND strategy IN ?", baseIDs, cfg.Strategies).
-			Delete(&model.AdversarialSample{}).Error
-	}
+	_ = s.DB.WithContext(ctx).
+		Where("base_contract_id IN ?", baseIDs).
+		Delete(&model.AdversarialSample{}).Error
 
-	// 2) 对原始合约做推理，得到 baseline（不落库 detect_results，避免污染检测数据；后续替换为真实推理也更清晰）
-	origResults := map[string]*model.DetectResult{}
-	for _, ct := range contracts {
-		_, _, label, confidence, vulnType := inferByHeuristic(ct.ProcessedSource, mappings)
-		origResults[ct.ID] = &model.DetectResult{
-			ContractID: ct.ID,
-			Label:      label,
-			Confidence: confidence,
-			VulnType:   vulnType,
-		}
-	}
-	if len(origResults) == 0 {
-		s.fail(jobID, fmt.Errorf("原始检测全部失败"))
-		return
-	}
+	perContract := make([]robustPerContract, 0, len(contracts))
+	perStrategy := map[string]*robustStrategyAgg{}
 
-	// 3) 生成简单对抗样本并检测
-	var totalAdv, flippedCount int
-	var totalConfDrop float64
+	var totalVariants int
+	var attackSuccesses int
+	var attackableContracts int
+	var origCorrect int
+	var advCorrect int
 
-	type perContractAgg struct {
-		BaseContractID   string         `json:"baseContractId"`
-		ContractName     string         `json:"contractName"`
-		OrigLabel        model.Label    `json:"origLabel"`
-		OrigConfidence   float64        `json:"origConfidence"`
-		AdvTotal         int            `json:"advTotal"`
-		Flipped          int            `json:"flipped"`
-		AvgAdvConfidence float64        `json:"avgAdvConfidence"`
-		AvgConfDrop      float64        `json:"avgConfDrop"`
-		ByStrategy       map[string]any `json:"byStrategy"`
-	}
-	perContract := map[string]*perContractAgg{}
-	type stratAgg struct {
-		Total       int
-		Flipped     int
-		ConfDropSum float64
-	}
-	perStrategy := map[string]*stratAgg{}
-
-	for _, ct := range contracts {
-		base := ct
-		orig, ok := origResults[base.ID]
-		if !ok {
+	for _, contract := range contracts {
+		baseline, err := s.Detector.runModelInference(trainedModel.Artifact, contract.ProcessedSource, prompt.TemplateText)
+		if err != nil {
+			perContract = append(perContract, robustPerContract{
+				BaseContractID: contract.ID,
+				ContractName:   contract.Name,
+				SkippedReason:  err.Error(),
+			})
 			continue
 		}
-		if _, ok := perContract[base.ID]; !ok {
-			perContract[base.ID] = &perContractAgg{
-				BaseContractID:   base.ID,
-				ContractName:     base.Name,
-				OrigLabel:        orig.Label,
-				OrigConfidence:   orig.Confidence,
-				ByStrategy:       map[string]any{},
-				AvgAdvConfidence: 0,
-				AvgConfDrop:      0,
-			}
+
+		baseVulnScore := scoreForLabel(baseline, "vulnerable")
+		row := robustPerContract{
+			BaseContractID: contract.ID,
+			ContractName:   contract.Name,
+			OrigLabel:      model.Label(baseline.Label),
+			OrigConfidence: baseline.Confidence,
+			OrigVulnScore:  baseVulnScore,
+			Attackable:     baseline.Label == string(model.LabelVulnerable),
+			ByStrategy:     map[string]any{},
 		}
-		contractAgg := perContract[base.ID]
-		for _, strat := range cfg.Strategies {
-			if _, ok := perStrategy[strat]; !ok {
-				perStrategy[strat] = &stratAgg{}
+		if !row.Attackable {
+			row.SkippedReason = "原始样本未被模型判定为目标漏洞，按论文口径不进入攻击成功率统计"
+			perContract = append(perContract, row)
+			continue
+		}
+
+		attackableContracts++
+		origCorrect++
+
+		fragments := s.searchCoreFragments(trainedModel.Artifact, prompt.TemplateText, contract.ProcessedSource, meta.TargetVulnType, baseVulnScore, cfg.VariantsPerSource)
+		row.CoreFragments = fragments
+		if len(fragments) == 0 {
+			row.SkippedReason = "未定位到高敏感核心脆弱代码"
+			perContract = append(perContract, row)
+			continue
+		}
+
+		bestConfidence := 1.0
+		bestDrop := 0.0
+		bestFlip := false
+		var bestSample *robustAttackSample
+		row.AdvTotal = 0
+		row.Flipped = 0
+
+		for _, strategy := range cfg.Strategies {
+			if _, ok := perStrategy[strategy]; !ok {
+				perStrategy[strategy] = &robustStrategyAgg{}
 			}
-			// per-contract per-strategy
-			key := strat
-			if _, ok := contractAgg.ByStrategy[key]; !ok {
-				contractAgg.ByStrategy[key] = map[string]any{
-					"total":       0,
-					"flipped":     0,
-					"avgConfDrop": 0.0,
+
+			strategyTotal := 0
+			strategyFlipped := 0
+			strategyDrop := 0.0
+
+			for variantIndex := 1; variantIndex <= cfg.VariantsPerSource; variantIndex++ {
+				usedFragments := fragments[:minInt(variantIndex, len(fragments))]
+				advSource, advProcessed, sampleDetail, err := buildCallChainHidingAdversarial(contract, usedFragments, variantIndex)
+				if err != nil {
+					continue
 				}
-			}
-			for i := 0; i < cfg.VariantsPerSource; i++ {
-				advSource := generateSimpleAdversarial(base.Source, strat, i)
-				advProcessed := generateSimpleAdversarial(base.ProcessedSource, strat, i)
+
+				advResult, err := s.Detector.runModelInference(trainedModel.Artifact, advProcessed, prompt.TemplateText)
+				if err != nil {
+					continue
+				}
+
+				success := advResult.Label == string(model.LabelNonVulnerable)
+				drop := math.Max(0, baseVulnScore-scoreForLabel(advResult, "vulnerable"))
+				sampleDetail.AttackSucceeded = success
+
 				sample := &model.AdversarialSample{
 					ID:              uuid.NewString(),
-					BaseContractID:  base.ID,
-					Strategy:        strat,
+					BaseContractID:  contract.ID,
+					Strategy:        strategy,
 					Source:          advSource,
 					ProcessedSource: advProcessed,
-					DiffJSON:        "",
+					DiffJSON:        mustMarshal(sampleDetail),
 				}
 				if err := s.DB.WithContext(ctx).Create(sample).Error; err != nil {
 					continue
 				}
-				// 直接对 processedSource 推理，不写入 contracts 表，避免数据管理列表无限增长
-				_, _, advLabel, advConf, _ := inferByHeuristic(advProcessed, mappings)
 
-				totalAdv++
-				perStrategy[strat].Total++
+				row.AdvTotal++
+				row.AvgAdvConfidence += advResult.Confidence
+				row.AvgConfDrop += drop
+				strategyTotal++
+				strategyDrop += drop
+				totalVariants++
+				perStrategy[strategy].TotalVariants++
+				perStrategy[strategy].ConfidenceDropSum += drop
+				perStrategy[strategy].CoreFragmentsTotal += len(usedFragments)
 
-				contractAgg.AdvTotal++
-				contractAgg.AvgAdvConfidence += advConf
-				// update per-strategy in contract
-				byStrat := contractAgg.ByStrategy[key].(map[string]any)
-				byStrat["total"] = byStrat["total"].(int) + 1
-
-				if orig.Label != advLabel {
-					flippedCount++
-					perStrategy[strat].Flipped++
-					contractAgg.Flipped++
-					byStrat["flipped"] = byStrat["flipped"].(int) + 1
+				if success {
+					row.Flipped++
+					strategyFlipped++
+					attackSuccesses++
+					perStrategy[strategy].AttackSuccesses++
 				}
-				if advConf < orig.Confidence {
-					drop := orig.Confidence - advConf
-					totalConfDrop += drop
-					perStrategy[strat].ConfDropSum += drop
-					contractAgg.AvgConfDrop += drop
-					byStrat["avgConfDrop"] = byStrat["avgConfDrop"].(float64) + drop
+
+				if !success {
+					advCorrect++
 				}
-				contractAgg.ByStrategy[key] = byStrat
+
+				if success && (bestSample == nil || advResult.Confidence < bestConfidence) {
+					copySample := sampleDetail
+					bestSample = &copySample
+					bestConfidence = advResult.Confidence
+					bestDrop = drop
+					bestFlip = true
+					row.BestAttackStrategy = strategy
+				}
+
+				if !bestFlip && drop > bestDrop {
+					copySample := sampleDetail
+					bestSample = &copySample
+					bestConfidence = advResult.Confidence
+					bestDrop = drop
+					row.BestAttackStrategy = strategy
+				}
 			}
+
+			row.ByStrategy[strategy] = map[string]any{
+				"total":                  strategyTotal,
+				"attackSuccesses":        strategyFlipped,
+				"attackSuccessRate":      safeDiv(float64(strategyFlipped), float64(maxInt(strategyTotal, 1))),
+				"avgConfidenceDrop":      safeDiv(strategyDrop, float64(maxInt(strategyTotal, 1))),
+				"avgCoreFragmentsHidden": averageFragmentsPerStrategy(strategy, perStrategy),
+			}
+		}
+
+		if row.AdvTotal > 0 {
+			row.AvgAdvConfidence = round4(row.AvgAdvConfidence / float64(row.AdvTotal))
+			row.AvgConfDrop = round4(row.AvgConfDrop / float64(row.AdvTotal))
+			row.BestAttackSample = bestSample
+		}
+		perContract = append(perContract, row)
+	}
+
+	origAccuracy := safeDiv(float64(origCorrect), float64(maxInt(attackableContracts, 1)))
+	advAccuracy := safeDiv(float64(advCorrect), float64(maxInt(totalVariants, 1)))
+	attackSuccessRate := safeDiv(float64(attackSuccesses), float64(maxInt(totalVariants, 1)))
+	accuracyDropRate := 0.0
+	if origAccuracy > 0 {
+		accuracyDropRate = (origAccuracy - advAccuracy) / origAccuracy
+		if accuracyDropRate < 0 {
+			accuracyDropRate = 0
 		}
 	}
 
-	if totalAdv == 0 {
-		s.fail(jobID, fmt.Errorf("未成功生成任何对抗样本检测结果"))
-		return
-	}
-
-	flipRate := float64(flippedCount) / float64(totalAdv)
-	avgConfDrop := totalConfDrop / float64(totalAdv)
-
 	perStrategyOut := make([]map[string]any, 0, len(perStrategy))
-	for strat, a := range perStrategy {
-		if a.Total == 0 {
+	for strategy, agg := range perStrategy {
+		if agg.TotalVariants == 0 {
 			continue
 		}
 		perStrategyOut = append(perStrategyOut, map[string]any{
-			"strategy":          strat,
-			"total":             a.Total,
-			"flipped":           a.Flipped,
-			"flipRate":          round4(float64(a.Flipped) / float64(a.Total)),
-			"avgConfidenceDrop": round4(a.ConfDropSum / float64(a.Total)),
+			"strategy":               strategy,
+			"totalVariants":          agg.TotalVariants,
+			"attackSuccesses":        agg.AttackSuccesses,
+			"attackSuccessRate":      round4(safeDiv(float64(agg.AttackSuccesses), float64(agg.TotalVariants))),
+			"avgConfidenceDrop":      round4(safeDiv(agg.ConfidenceDropSum, float64(agg.TotalVariants))),
+			"avgCoreFragmentsHidden": round4(safeDiv(float64(agg.CoreFragmentsTotal), float64(agg.TotalVariants))),
 		})
 	}
-
-	perContractOut := make([]perContractAgg, 0, len(perContract))
-	for _, c := range perContract {
-		if c.AdvTotal > 0 {
-			c.AvgAdvConfidence = round4(c.AvgAdvConfidence / float64(c.AdvTotal))
-			c.AvgConfDrop = round4(c.AvgConfDrop / float64(c.AdvTotal))
-			// normalize per-strategy avgConfDrop accumulators
-			for k, v := range c.ByStrategy {
-				m := v.(map[string]any)
-				t := m["total"].(int)
-				if t > 0 {
-					m["avgConfDrop"] = round4(m["avgConfDrop"].(float64) / float64(t))
-				} else {
-					m["avgConfDrop"] = 0.0
-				}
-				c.ByStrategy[k] = m
-			}
-		}
-		perContractOut = append(perContractOut, *c)
-	}
+	sort.Slice(perStrategyOut, func(i, j int) bool {
+		left := perStrategyOut[i]["attackSuccessRate"].(float64)
+		right := perStrategyOut[j]["attackSuccessRate"].(float64)
+		return left > right
+	})
 
 	metrics := map[string]any{
-		"totalAdversarial":  totalAdv,
-		"flipped":           flippedCount,
-		"flipRate":          round4(flipRate),
-		"avgConfidenceDrop": round4(avgConfDrop),
-		"perStrategy":       perStrategyOut,
-		"perContract":       perContractOut,
+		"targetVulnType":      meta.TargetVulnType,
+		"attackPipeline":      []string{"core-fragment-search", "fake-call-chain-replacement", "unreachable-path-hiding"},
+		"attackableContracts": attackableContracts,
+		"totalAdversarial":    totalVariants,
+		"attackSuccesses":     attackSuccesses,
+		"attackSuccessRate":   round4(attackSuccessRate),
+		"origAccuracy":        round4(origAccuracy),
+		"advAccuracy":         round4(advAccuracy),
+		"accuracyDropRate":    round4(accuracyDropRate),
+		"avgConfidenceDrop":   round4(averageConfidenceDrop(perContract)),
+		"perStrategy":         perStrategyOut,
+		"perContract":         perContract,
 	}
-	metricsBytes, _ := json.Marshal(metrics)
 
 	finish := time.Now()
 	_ = s.DB.WithContext(ctx).Model(&model.RobustJob{}).Where("id = ?", jobID).
 		Updates(map[string]any{
 			"status":       model.RobustJobStatusSuccess,
-			"metrics_json": string(metricsBytes),
+			"metrics_json": mustMarshal(metrics),
 			"finished_at":  finish,
 		}).Error
+}
+
+func (s *RobustService) loadModelMetadata(artifact string) (*modelArtifactMetadata, error) {
+	modelDir, err := resolveArtifactPath(artifact)
+	if err != nil {
+		return nil, err
+	}
+	metadataPath := filepath.Join(modelDir, "metadata.json")
+	var meta modelArtifactMetadata
+	if err := readJSONFile(metadataPath, &meta); err != nil {
+		return nil, fmt.Errorf("读取模型元数据失败: %w", err)
+	}
+	if strings.TrimSpace(meta.TargetVulnType) == "" {
+		return nil, fmt.Errorf("模型元数据缺少 target_vuln_type")
+	}
+	return &meta, nil
+}
+
+func (s *RobustService) searchCoreFragments(artifact, promptText, processedSource, targetVulnType string, baseVulnScore float64, maxFragments int) []robustCoreFragment {
+	lines := strings.Split(processedSource, "\n")
+	candidates := candidateLineIndexes(lines, targetVulnType)
+	if len(candidates) == 0 {
+		for idx, line := range lines {
+			if strings.TrimSpace(line) != "" {
+				candidates = append(candidates, idx)
+			}
+		}
+	}
+
+	fragments := make([]robustCoreFragment, 0, len(candidates))
+	for _, idx := range candidates {
+		line := strings.TrimSpace(lines[idx])
+		if line == "" {
+			continue
+		}
+		masked := append([]string(nil), lines...)
+		masked[idx] = ""
+		result, err := s.Detector.runModelInference(artifact, strings.Join(masked, "\n"), promptText)
+		if err != nil {
+			continue
+		}
+		vulnScore := scoreForLabel(result, "vulnerable")
+		sensitivity := math.Max(0, baseVulnScore-vulnScore)
+		if result.Label == string(model.LabelNonVulnerable) {
+			sensitivity += 0.25
+		}
+		fragments = append(fragments, robustCoreFragment{
+			Index:       len(fragments),
+			LineNumber:  idx + 1,
+			Content:     line,
+			Sensitivity: round4(sensitivity),
+			VulnScore:   round4(vulnScore),
+			Label:       result.Label,
+		})
+	}
+
+	sort.Slice(fragments, func(i, j int) bool {
+		if fragments[i].Sensitivity == fragments[j].Sensitivity {
+			return fragments[i].LineNumber < fragments[j].LineNumber
+		}
+		return fragments[i].Sensitivity > fragments[j].Sensitivity
+	})
+	if maxFragments > 0 && len(fragments) > maxFragments {
+		fragments = fragments[:maxFragments]
+	}
+	return fragments
+}
+
+func candidateLineIndexes(lines []string, targetVulnType string) []int {
+	keywords := map[string][]string{
+		"reentrancy":     {"call.value", ".call{", ".call(", ".send(", ".transfer(", "delegatecall"},
+		"access_control": {"tx.origin", "msg.sender", "onlyowner", "owner", "require("},
+		"arithmetic":     {"unchecked", "+", "-", "*", "/", "++", "--"},
+	}
+	selected := keywords[strings.TrimSpace(targetVulnType)]
+	indexes := make([]int, 0)
+	for idx, line := range lines {
+		trimmed := strings.TrimSpace(strings.ToLower(line))
+		if trimmed == "" {
+			continue
+		}
+		for _, keyword := range selected {
+			if strings.Contains(trimmed, strings.ToLower(keyword)) {
+				indexes = append(indexes, idx)
+				break
+			}
+		}
+	}
+	return indexes
+}
+
+func buildCallChainHidingAdversarial(contract model.Contract, fragments []robustCoreFragment, variantIndex int) (string, string, robustAttackSample, error) {
+	if len(fragments) == 0 {
+		return "", "", robustAttackSample{}, fmt.Errorf("no fragments selected")
+	}
+
+	sourceLines := strings.Split(contract.Source, "\n")
+	processedLines := strings.Split(contract.ProcessedSource, "\n")
+	opaqueGuards := make([]string, 0, len(fragments))
+	wrapperNames := make([]string, 0, len(fragments))
+	wrappersSource := make([]string, 0, len(fragments))
+	wrappersProcessed := make([]string, 0, len(fragments))
+
+	for i, fragment := range fragments {
+		lineIdx := fragment.LineNumber - 1
+		if lineIdx < 0 || lineIdx >= len(processedLines) {
+			continue
+		}
+		indent := leadingIndent(processedLines[lineIdx])
+		guardName := fmt.Sprintf("__robust_guard_%d_%d", variantIndex, i)
+		wrapperName := fmt.Sprintf("__robust_hidden_call_%d_%d", variantIndex, i)
+		guardLine := fmt.Sprintf("%suint256 %s = 1; if ((%s + 1) >= 1) { %s(); }", indent, guardName, guardName, wrapperName)
+		opaqueGuards = append(opaqueGuards, guardName)
+		wrapperNames = append(wrapperNames, wrapperName)
+
+		processedTarget := strings.TrimSpace(processedLines[lineIdx])
+		processedLines[lineIdx] = guardLine
+		wrappersProcessed = append(wrappersProcessed, buildWrapperFunction(wrapperName, processedTarget))
+
+		sourceLineIdx := findMatchingLine(sourceLines, fragment.Content)
+		if sourceLineIdx >= 0 {
+			sourceIndent := leadingIndent(sourceLines[sourceLineIdx])
+			sourceTarget := strings.TrimSpace(sourceLines[sourceLineIdx])
+			sourceLines[sourceLineIdx] = fmt.Sprintf("%suint256 %s = 1; if ((%s + 1) >= 1) { %s(); }", sourceIndent, guardName, guardName, wrapperName)
+			wrappersSource = append(wrappersSource, buildWrapperFunction(wrapperName, sourceTarget))
+		}
+	}
+
+	advProcessed := injectWrappers(strings.Join(processedLines, "\n"), wrappersProcessed)
+	advSource := injectWrappers(strings.Join(sourceLines, "\n"), wrappersSource)
+	detail := robustAttackSample{
+		VariantIndex:  variantIndex,
+		FragmentsUsed: fragments,
+		OpaqueGuards:  opaqueGuards,
+		WrapperNames:  wrapperNames,
+	}
+	return advSource, advProcessed, detail, nil
+}
+
+func buildWrapperFunction(wrapperName, body string) string {
+	statement := strings.TrimSpace(body)
+	if statement == "" {
+		statement = "// empty"
+	}
+	return fmt.Sprintf("    function %s() private {\n        %s\n    }\n", wrapperName, statement)
+}
+
+func injectWrappers(source string, wrappers []string) string {
+	if len(wrappers) == 0 {
+		return source
+	}
+	insert := "\n" + strings.Join(wrappers, "\n")
+	lastBrace := strings.LastIndex(source, "}")
+	if lastBrace == -1 {
+		return source + insert
+	}
+	return source[:lastBrace] + insert + source[lastBrace:]
+}
+
+func findMatchingLine(lines []string, content string) int {
+	target := strings.TrimSpace(content)
+	for idx, line := range lines {
+		if strings.TrimSpace(line) == target {
+			return idx
+		}
+	}
+	return -1
+}
+
+func leadingIndent(line string) string {
+	var b strings.Builder
+	for _, r := range line {
+		if r == ' ' || r == '\t' {
+			b.WriteRune(r)
+			continue
+		}
+		break
+	}
+	return b.String()
+}
+
+func scoreForLabel(result *modelInferenceResult, label string) float64 {
+	if result == nil {
+		return 0
+	}
+	if result.Scores != nil {
+		if v, ok := result.Scores[label]; ok {
+			return v
+		}
+	}
+	normalized := strings.ToLower(strings.ReplaceAll(label, "-", "_"))
+	for _, item := range result.TopK {
+		if strings.ToLower(strings.ReplaceAll(item.Token, "-", "_")) == normalized {
+			return item.Score
+		}
+	}
+	return 0
+}
+
+func averageConfidenceDrop(rows []robustPerContract) float64 {
+	total := 0.0
+	count := 0
+	for _, row := range rows {
+		if row.AdvTotal == 0 {
+			continue
+		}
+		total += row.AvgConfDrop
+		count++
+	}
+	return safeDiv(total, float64(maxInt(count, 1)))
+}
+
+func averageFragmentsPerStrategy(strategy string, agg map[string]*robustStrategyAgg) float64 {
+	item, ok := agg[strategy]
+	if !ok || item.TotalVariants == 0 {
+		return 0
+	}
+	return round4(safeDiv(float64(item.CoreFragmentsTotal), float64(item.TotalVariants)))
+}
+
+func mustMarshal(v any) string {
+	data, _ := json.Marshal(v)
+	return string(data)
+}
+
+func readJSONFile(path string, out any) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(data, out)
+}
+
+func safeDiv(numerator, denominator float64) float64 {
+	if denominator == 0 {
+		return 0
+	}
+	return numerator / denominator
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 func (s *RobustService) fail(jobID string, err error) {
@@ -327,41 +664,4 @@ func (s *RobustService) fail(jobID string, err error) {
 		"error":       err.Error(),
 		"finished_at": finish,
 	}).Error
-}
-
-// generateSimpleAdversarial 一个非常简单的占位扰动生成器，后续可替换为更强的对抗算法。
-func generateSimpleAdversarial(source string, strategy string, idx int) string {
-	s := source
-	switch strategy {
-	case "insert-dead-code":
-		// 简单在结尾插入一段不会执行的代码块
-		s += "\nif (false) { // dead code " + fmt.Sprint(idx) + "\n}\n"
-	case "rename-identifiers":
-		// 非严格的占位改名：把常见名字后面拼接后缀
-		repls := []struct {
-			old string
-			new string
-		}{
-			{"owner", fmt.Sprintf("owner_r%d", idx)},
-			{"temp", fmt.Sprintf("temp_r%d", idx)},
-		}
-		for _, r := range repls {
-			s = strings.ReplaceAll(s, r.old, r.new)
-		}
-	case "trigger-injection":
-		// 触发词注入：通过重复插入风险关键词，提高“对 token 扰动敏感性”的可观察性（便于演示翻转与置信度变化）。
-		// 当前启发式检测会统计关键词出现次数；若合约中 benignKeywords 数量很高，少量注入可能不足以触发翻转，因此这里重复注入。
-		repeat := 30
-		var b strings.Builder
-		b.WriteString("\n// adversarial trigger ")
-		b.WriteString(fmt.Sprint(idx))
-		b.WriteString(": ")
-		for i := 0; i < repeat; i++ {
-			b.WriteString("delegatecall tx.origin call.value selfdestruct ")
-		}
-		b.WriteString("\n")
-		s += b.String()
-	default:
-	}
-	return s
 }

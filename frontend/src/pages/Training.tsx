@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Button,
   Card,
@@ -26,14 +26,18 @@ import {
   getTrainJob,
   getTrainJobMetrics,
   listModels,
+  TARGET_VULN_OPTIONS,
+  type TargetVulnType,
   type TrainJob,
   type TrainJobStatus,
   type TrainMetric,
   type TrainedModel,
 } from "../services/training";
 import { listPrompts, type Prompt } from "../services/prompts";
+import { getPageCache, setPageCache } from "../utils/pageCache";
 
 const FEWSHOT_MAX = 64;
+const TRAINING_CACHE_KEY = "page:training";
 
 const statusColor: Record<TrainJobStatus, string> = {
   queued: "default",
@@ -60,9 +64,47 @@ function statusText(s: TrainJobStatus) {
   }
 }
 
+function vulnTypeText(v: string | undefined) {
+  switch (v) {
+    case "reentrancy":
+      return "重入漏洞";
+    case "access_control":
+      return "访问控制漏洞";
+    case "arithmetic":
+      return "整数算术漏洞";
+    default:
+      return v || "--";
+  }
+}
+
+function inferModelTarget(name: string) {
+  if (name.includes("-reentrancy-")) return "reentrancy";
+  if (name.includes("-access-control-")) return "access_control";
+  if (name.includes("-arithmetic-")) return "arithmetic";
+  return "";
+}
+
 export default function Training() {
+  const cachedState = getPageCache<{
+    formValues?: Partial<{
+      promptId: string;
+      targetVulnType: TargetVulnType;
+      fewshotSize: number;
+      epochs: number;
+      batchSize: number;
+      learningRate: number;
+      datasetRef: string;
+      baseModel: string;
+      maxLength: number;
+      seed: number;
+    }>;
+    currentJob?: TrainJob | null;
+    metrics?: TrainMetric[];
+  }>(TRAINING_CACHE_KEY);
+
   const [form] = Form.useForm<{
     promptId: string;
+    targetVulnType: TargetVulnType;
     fewshotSize: number;
     epochs: number;
     batchSize: number;
@@ -76,11 +118,16 @@ export default function Training() {
   const [prompts, setPrompts] = useState<Prompt[]>([]);
   const [loadingPrompts, setLoadingPrompts] = useState(false);
 
-  const [currentJob, setCurrentJob] = useState<TrainJob | null>(null);
-  const [metrics, setMetrics] = useState<TrainMetric[]>([]);
+  const [currentJob, setCurrentJob] = useState<TrainJob | null>(
+    cachedState?.currentJob ?? null,
+  );
+  const [metrics, setMetrics] = useState<TrainMetric[]>(
+    cachedState?.metrics ?? [],
+  );
   const [models, setModels] = useState<TrainedModel[]>([]);
 
   const [creating, setCreating] = useState(false);
+  const pollTimerRef = useRef<number | null>(null);
 
   const loadedModel = useMemo(
     () => models.find((m) => m.isLoaded) ?? null,
@@ -121,6 +168,44 @@ export default function Training() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  useEffect(() => {
+    const initialValues = {
+      targetVulnType: "reentrancy" as TargetVulnType,
+      fewshotSize: 32,
+      epochs: 3,
+      batchSize: 4,
+      learningRate: 2e-5,
+      datasetRef: "smartbugs-curated",
+      baseModel: "microsoft/codebert-base",
+      maxLength: 256,
+      seed: 42,
+      ...cachedState?.formValues,
+    };
+    form.setFieldsValue(initialValues);
+  }, [form, cachedState?.formValues]);
+
+  useEffect(() => {
+    setPageCache(TRAINING_CACHE_KEY, {
+      formValues: form.getFieldsValue(),
+      currentJob,
+      metrics,
+    });
+  }, [form, currentJob, metrics]);
+
+  useEffect(() => {
+    if (!currentJob || (currentJob.status !== "running" && currentJob.status !== "queued")) {
+      return;
+    }
+    startPolling(currentJob.id);
+    return () => {
+      if (pollTimerRef.current !== null) {
+        window.clearTimeout(pollTimerRef.current);
+        pollTimerRef.current = null;
+      }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentJob?.id]);
+
   const refreshModels = async () => {
     try {
       const data = await listModels();
@@ -133,6 +218,10 @@ export default function Training() {
   };
 
   const startPolling = (jobId: string) => {
+    if (pollTimerRef.current !== null) {
+      window.clearTimeout(pollTimerRef.current);
+      pollTimerRef.current = null;
+    }
     const tick = async () => {
       try {
         const job = await getTrainJob(jobId);
@@ -140,7 +229,7 @@ export default function Training() {
         const m = await getTrainJobMetrics(jobId, 200);
         setMetrics(m);
         if (job.status === "running" || job.status === "queued") {
-          setTimeout(tick, 1000);
+          pollTimerRef.current = window.setTimeout(tick, 1000);
         } else {
           void refreshModels();
         }
@@ -168,6 +257,7 @@ export default function Training() {
         fewshotSize: v.fewshotSize,
         datasetRef: v.datasetRef,
         params: {
+          targetVulnType: v.targetVulnType,
           epochs: v.epochs,
           batchSize: v.batchSize,
           learningRate: v.learningRate,
@@ -220,6 +310,11 @@ export default function Training() {
       ),
     },
     { title: "基座模型", dataIndex: "baseModel", width: 120 },
+    {
+      title: "目标漏洞",
+      width: 140,
+      render: (_, m) => vulnTypeText(m.targetVulnType || inferModelTarget(m.name)),
+    },
     { title: "训练任务", dataIndex: "trainJobId", width: 220 },
   ];
 
@@ -228,6 +323,7 @@ export default function Training() {
     if (!currentJob?.paramsJson) return {};
     try {
       return JSON.parse(currentJob.paramsJson) as {
+        targetVulnType?: TargetVulnType;
         epochs?: number;
         batchSize?: number;
         learningRate?: number;
@@ -262,8 +358,8 @@ export default function Training() {
               小样本训练
             </Typography.Title>
             <Typography.Text type="secondary">
-              当前默认使用 CodeBERT 对本地数据集做真实微调训练，并实时记录
-              loss、acc、precision、recall、F1。
+              按目标漏洞类型构造“存在该漏洞 / 不存在该漏洞”的二分类任务，
+              在每类样本数受限的前提下完成小样本提示训练。
             </Typography.Text>
           </Col>
         </Row>
@@ -299,18 +395,25 @@ export default function Training() {
           layout="vertical"
           form={form}
           requiredMark="optional"
-          initialValues={{
-            fewshotSize: 32,
-            epochs: 3,
-            batchSize: 4,
-            learningRate: 2e-5,
-            datasetRef: "smartbugs-curated",
-            baseModel: "microsoft/codebert-base",
-            maxLength: 256,
-            seed: 42,
+          onValuesChange={() => {
+            setPageCache(TRAINING_CACHE_KEY, {
+              formValues: form.getFieldsValue(),
+              currentJob,
+              metrics,
+            });
           }}
         >
           <Row gutter={16}>
+            <Col xs={24} lg={8}>
+              <Form.Item
+                label="目标漏洞类型"
+                name="targetVulnType"
+                tooltip="系统会按所选漏洞类型构造 one-vs-rest 二分类训练集。"
+                rules={[{ required: true, message: "请选择目标漏洞类型" }]}
+              >
+                <Select options={TARGET_VULN_OPTIONS} />
+              </Form.Item>
+            </Col>
             <Col xs={24} lg={8}>
               <Form.Item
                 label="提示模板"
@@ -329,10 +432,11 @@ export default function Training() {
                 />
               </Form.Item>
             </Col>
-            <Col xs={24} lg={4}>
+            <Col xs={24} lg={8}>
               <Form.Item
-                label={`小样本训练集大小`}
+                label="每类小样本数量"
                 name="fewshotSize"
+                tooltip="正类为目标漏洞样本，负类为非目标漏洞样本；每类训练样本数建议不超过 64。"
                 rules={[{ required: true, message: "请输入样本数量" }]}
               >
                 <InputNumber
@@ -342,7 +446,7 @@ export default function Training() {
                 />
               </Form.Item>
             </Col>
-            <Col xs={24} lg={4}>
+            <Col xs={24} lg={6}>
               <Form.Item
                 label="Epochs"
                 name="epochs"
@@ -351,7 +455,7 @@ export default function Training() {
                 <InputNumber min={1} max={100} style={{ width: "100%" }} />
               </Form.Item>
             </Col>
-            <Col xs={24} lg={4}>
+            <Col xs={24} lg={6}>
               <Form.Item
                 label="Batch Size"
                 name="batchSize"
@@ -360,7 +464,7 @@ export default function Training() {
                 <InputNumber min={1} max={128} style={{ width: "100%" }} />
               </Form.Item>
             </Col>
-            <Col xs={24} lg={4}>
+            <Col xs={24} lg={6}>
               <Form.Item
                 label="学习率"
                 name="learningRate"
@@ -376,16 +480,16 @@ export default function Training() {
             </Col>
           </Row>
           <Row gutter={16}>
-            <Col xs={24} lg={8}>
+            <Col xs={24} lg={12}>
               <Form.Item
                 label="数据集标识"
                 name="datasetRef"
-                tooltip="支持内置别名或本地绝对路径。可填 demo、smartbugs-curated，或 /Users/Shabix/Personal/sc-vuln-detector/python_scripts/datasets/smartbugs-curated。"
+                tooltip="支持内置别名或本地绝对路径。默认 smartbugs-curated 会从所选漏洞类型抽取正类，并将其余漏洞样本视为负类。"
               >
                 <Input placeholder="例如：smartbugs-curated" />
               </Form.Item>
             </Col>
-            <Col xs={24} lg={6}>
+            <Col xs={24} lg={4}>
               <Form.Item
                 label="基座模型"
                 name="baseModel"
@@ -394,7 +498,7 @@ export default function Training() {
                 <Input placeholder="例如：microsoft/codebert-base" />
               </Form.Item>
             </Col>
-            <Col xs={24} lg={5}>
+            <Col xs={24} lg={4}>
               <Form.Item
                 label="最大长度"
                 name="maxLength"
@@ -408,7 +512,7 @@ export default function Training() {
                 />
               </Form.Item>
             </Col>
-            <Col xs={24} lg={5}>
+            <Col xs={24} lg={4}>
               <Form.Item
                 label="随机种子"
                 name="seed"
@@ -493,7 +597,10 @@ export default function Training() {
                       {statusText(currentJob.status)}
                     </Tag>
                   </Descriptions.Item>
-                  <Descriptions.Item label="小样本数量">
+                  <Descriptions.Item label="目标漏洞">
+                    {vulnTypeText(parsedParams.targetVulnType)}
+                  </Descriptions.Item>
+                  <Descriptions.Item label="每类样本数">
                     {currentJob.fewshotSize}
                   </Descriptions.Item>
                   <Descriptions.Item label="错误信息">

@@ -380,17 +380,16 @@ export default function Training() {
               <Form.Item
                 label="数据集标识"
                 name="datasetRef"
-                tooltip="支持内置别名，或直接填写本地绝对路径。smartbugs-curated 已迁入仓库内 python_scripts/datasets。"
-                extra="可填 demo、smartbugs-curated，或本地绝对路径，例如 /Users/Shabix/Personal/sc-vuln-detector/python_scripts/datasets/smartbugs-curated"
+                tooltip="支持内置别名或本地绝对路径。可填 demo、smartbugs-curated，或 /Users/Shabix/Personal/sc-vuln-detector/python_scripts/datasets/smartbugs-curated。"
               >
-                <Input placeholder="例如：smartbugs-curated 或 /Users/Shabix/Personal/sc-vuln-detector/python_scripts/datasets/smartbugs-curated" />
+                <Input placeholder="例如：smartbugs-curated" />
               </Form.Item>
             </Col>
             <Col xs={24} lg={6}>
               <Form.Item
                 label="基座模型"
                 name="baseModel"
-                extra="当前已验证 microsoft/codebert-base"
+                tooltip="当前已验证 microsoft/codebert-base。"
               >
                 <Input placeholder="例如：microsoft/codebert-base" />
               </Form.Item>

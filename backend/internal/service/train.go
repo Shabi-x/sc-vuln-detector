@@ -20,7 +20,6 @@ import (
 	"sc-vuln-detector/backend/internal/model"
 )
 
-// Trainer 负责调度训练任务。当前实现为 Python Demo 版本，用于打通“后端编排 → Python 训练 → 指标/产物落库”的链路。
 type Trainer struct {
 	DB *gorm.DB
 }
@@ -62,7 +61,7 @@ func (t *Trainer) CreateJob(ctx context.Context, req TrainRequest) (*model.Train
 		return nil, err
 	}
 
-	go t.runPython(job.ID)
+	go t.runPython(job.ID) // 异步启动 Python 训练
 
 	return job, nil
 }
@@ -103,7 +102,7 @@ func (t *Trainer) runPython(jobID string) {
 
 	cmd := exec.Command(
 		pythonExecutable(),
-		filepath.ToSlash(filepath.Join("..", "python_scripts", "train_demo.py")),
+		filepath.ToSlash(filepath.Join("..", "python_scripts", "train_fewshot_detector.py")),
 		"--job_id", jobID,
 		"--fewshot_size", strconv.Itoa(job.FewshotSize),
 		"--epochs", strconv.Itoa(epochs),

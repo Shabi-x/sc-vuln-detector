@@ -1,5 +1,11 @@
 from __future__ import annotations
 
+# 推理流程概述：
+# 1. 读取训练阶段保存的模型目录与 metadata，恢复目标漏洞类型、标签映射和默认提示模板；
+# 2. 将待测智能合约源码按训练时相同的提示模板渲染并送入 tokenizer；
+# 3. 调用分类模型输出二分类概率，生成标签、置信度、目标漏洞类型和 top-k 结果；
+# 4. 将结构化推理结果返回给后端检测与鲁棒性模块复用。
+
 import argparse
 import json
 import sys
@@ -39,6 +45,7 @@ def choose_device() -> str:
 
 
 def render_text(source: str, prompt_text: str | None, mask_token: str) -> str:
+    # 推理阶段复用训练时相同的模板渲染方式，避免训练/检测输入分布不一致。
     if not prompt_text:
         return source
     rendered = prompt_text.replace("[X]", source)
@@ -75,6 +82,7 @@ def main() -> None:
         raise ValueError(f"model dir does not exist: {model_dir}")
 
     metadata = load_metadata(model_dir)
+    # 检测模块优先使用模型训练时写入的元数据，保证目标漏洞类型和默认模板可追溯。
     target_vuln_type = str(metadata.get("target_vuln_type") or "").strip()
     if not target_vuln_type:
         raise ValueError("model metadata is missing target_vuln_type")
@@ -98,6 +106,7 @@ def main() -> None:
         raise ValueError("label map is missing from metadata and model config")
 
     rendered = render_text(source, prompt_text, tokenizer.mask_token or "<mask>")
+    # 当前推理脚本直接读取分类头输出概率，而不是再走额外的启发式关键词判断。
     encoded = tokenizer(
         rendered,
         truncation=True,
@@ -127,6 +136,7 @@ def main() -> None:
 
     top_entry = ranked[0]
     predicted_label_name = str(top_entry["token"])
+    # 输出中同时保留二分类结论、目标漏洞类型和 top-k 概率，供检测页与鲁棒性评估复用。
     result = {
         "label": infer_label(predicted_label_name),
         "label_name": predicted_label_name,

@@ -1,5 +1,11 @@
 from __future__ import annotations
 
+# 训练流程概述：
+# 1. 读取 smartbugs-curated 目录或 JSONL 数据集并标准化源码/标签字段；
+# 2. 按目标漏洞类型将原始样本转换为 one-vs-rest 二分类 few-shot 训练任务；
+# 3. 使用提示模板渲染输入文本，加载 CodeBERT 分类模型完成训练与验证；
+# 4. 按最佳 F1 保存模型、tokenizer 和 metadata，并通过 stdout 输出指标与 summary 给后端落库。
+
 import argparse
 import json
 import random

@@ -229,7 +229,7 @@ func (d *Detector) runModelInference(artifactPath, source, promptText string) (*
 
 	cmd := exec.Command(
 		pythonExecutable(),
-		filepath.ToSlash(filepath.Join("..", "python_scripts", "infer_demo.py")),
+		filepath.ToSlash(filepath.Join("..", "python_scripts", "infer_detector.py")),
 		"--model_dir", modelDir,
 	)
 	if strings.TrimSpace(promptText) != "" {

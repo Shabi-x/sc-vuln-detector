@@ -482,9 +482,9 @@ export default function Training() {
           <Row gutter={16}>
             <Col xs={24} lg={12}>
               <Form.Item
-                label="数据集标识"
+                label="训练数据集"
                 name="datasetRef"
-                tooltip="支持内置别名或本地绝对路径。默认 smartbugs-curated 会从所选漏洞类型抽取正类，并将其余漏洞样本视为负类。"
+                tooltip="选择用于本次小样本训练的数据集。支持内置数据集别名或本地绝对路径。默认 smartbugs-curated 会从所选漏洞类型抽取正类，并将其余漏洞样本视为负类。"
               >
                 <Input placeholder="例如：smartbugs-curated" />
               </Form.Item>

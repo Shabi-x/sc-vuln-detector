@@ -44,6 +44,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--val_ratio", type=float, default=0.2)
     parser.add_argument("--target_vuln_type", default="reentrancy")
+    parser.add_argument("--artifact_prefix", help="训练产物命名前缀，可选")
     parser.add_argument(
         "--dataset_path",
         type=Path,
@@ -52,7 +53,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--out_dir",
         type=Path,
-        default=Path("python_scripts/demo_outputs"),
+        default=Path("python_scripts/outputs"),
         help="用于保存训练指标和模型产物的目录",
     )
     return parser.parse_args()
@@ -367,7 +368,8 @@ def main() -> None:
 
     best_epoch_summary: dict[str, Any] | None = None
     best_f1 = -1.0
-    artifact_dir = args.out_dir / f"{args.job_id}_model"
+    artifact_prefix = (args.artifact_prefix or args.job_id).strip() or args.job_id
+    artifact_dir = args.out_dir / f"{artifact_prefix}_model"
     artifact_dir.mkdir(parents=True, exist_ok=True)
 
     metric_history: list[dict[str, Any]] = []
@@ -424,7 +426,7 @@ def main() -> None:
                 encoding="utf-8",
             )
 
-    metrics_path = args.out_dir / f"{args.job_id}_metrics.json"
+    metrics_path = args.out_dir / f"{artifact_prefix}_metrics.json"
     metrics_path.write_text(
         json.dumps(
             {

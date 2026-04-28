@@ -83,14 +83,6 @@ export default function Detection() {
   );
   const pollTimerRef = useRef<number | null>(null);
 
-  const loadedModel = useMemo(
-    () => models.find((m) => m.isLoaded) ?? null,
-    [models],
-  );
-  const selectedPrompt = useMemo(
-    () => prompts.find((p) => p.id === selectedPromptId) ?? null,
-    [prompts, selectedPromptId],
-  );
   const selectedContractName = useMemo(
     () =>
       contracts.find((c) => c.id === selectedContractId)?.name ??
@@ -419,23 +411,30 @@ export default function Detection() {
 
         {mode === "single" ? (
           <Space direction="vertical" size={12} style={{ width: "100%" }}>
-            <Typography.Text type="secondary">待测合约</Typography.Text>
-            <Select
-              style={{ width: "100%" }}
-              value={selectedContractId}
-              onChange={setSelectedContractId}
-              options={contracts.map((c) => ({ value: c.id, label: c.name }))}
-              placeholder="选择待测合约"
-              showSearch
-              optionFilterProp="label"
-            />
-            <Button
-              type="primary"
-              onClick={() => void onDetectSingle()}
-              loading={loading}
-            >
-              开始单份检测
-            </Button>
+            <Row gutter={[12, 12]} align="bottom">
+              <Col xs={24} lg={18}>
+                <Typography.Text type="secondary">待测合约</Typography.Text>
+                <Select
+                  style={{ width: "100%", marginTop: 8 }}
+                  value={selectedContractId}
+                  onChange={setSelectedContractId}
+                  options={contracts.map((c) => ({ value: c.id, label: c.name }))}
+                  placeholder="选择待测合约"
+                  showSearch
+                  optionFilterProp="label"
+                />
+              </Col>
+              <Col xs={24} lg={6}>
+                <Button
+                  type="primary"
+                  onClick={() => void onDetectSingle()}
+                  loading={loading}
+                  style={{ width: "100%" }}
+                >
+                  开始单份检测
+                </Button>
+              </Col>
+            </Row>
 
             {singleResult ? (
               <Card
@@ -480,24 +479,31 @@ export default function Detection() {
           </Space>
         ) : (
           <Space direction="vertical" size={12} style={{ width: "100%" }}>
-            <Typography.Text type="secondary">待批量检测合约</Typography.Text>
-            <Select
-              mode="multiple"
-              style={{ width: "100%" }}
-              value={selectedContractIds}
-              onChange={setSelectedContractIds}
-              options={contracts.map((c) => ({ value: c.id, label: c.name }))}
-              placeholder="选择待批量检测合约"
-              showSearch
-              optionFilterProp="label"
-            />
-            <Button
-              type="primary"
-              onClick={() => void onDetectBatch()}
-              loading={loading}
-            >
-              启动批量检测
-            </Button>
+            <Row gutter={[12, 12]} align="bottom">
+              <Col xs={24} lg={18}>
+                <Typography.Text type="secondary">待批量检测合约</Typography.Text>
+                <Select
+                  mode="multiple"
+                  style={{ width: "100%", marginTop: 8 }}
+                  value={selectedContractIds}
+                  onChange={setSelectedContractIds}
+                  options={contracts.map((c) => ({ value: c.id, label: c.name }))}
+                  placeholder="选择待批量检测合约"
+                  showSearch
+                  optionFilterProp="label"
+                />
+              </Col>
+              <Col xs={24} lg={6}>
+                <Button
+                  type="primary"
+                  onClick={() => void onDetectBatch()}
+                  loading={loading}
+                  style={{ width: "100%" }}
+                >
+                  启动批量检测
+                </Button>
+              </Col>
+            </Row>
 
             {currentJob ? (
               <>
@@ -569,12 +575,6 @@ export default function Detection() {
             )}
           </Space>
         )}
-
-        <Divider style={{ margin: "16px 0 0" }} />
-        <Typography.Text type="secondary">
-          当前模板：{selectedPrompt?.name || "--"}；当前已加载模型：
-          {loadedModel?.name || "未加载"}
-        </Typography.Text>
       </Card>
     </Space>
   );

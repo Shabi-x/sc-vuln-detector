@@ -113,7 +113,8 @@ func (t *Trainer) runPython(jobID string) {
 		"--seed", strconv.Itoa(seed),
 		"--val_ratio", fmt.Sprintf("%g", valRatio),
 		"--target_vuln_type", targetVulnType,
-		"--out_dir", filepath.ToSlash(filepath.Join("..", "python_scripts", "demo_outputs")),
+		"--out_dir", filepath.ToSlash(filepath.Join("..", "python_scripts", "outputs")),
+		"--artifact_prefix", buildArtifactStem(baseModel, targetVulnType, job.FewshotSize, epochs, job.DatasetRef, job.CreatedAt),
 	)
 	if prompt.TemplateText != "" {
 		cmd.Args = append(cmd.Args, "--prompt_text", prompt.TemplateText)
@@ -192,10 +193,11 @@ func (t *Trainer) runPython(jobID string) {
 	}
 
 	metricsJSON, _ := json.Marshal(best)
+	artifactStem := buildArtifactStem(baseModelName, targetVulnType, job.FewshotSize, epochs, job.DatasetRef, job.CreatedAt)
 	modelRec := &model.TrainedModel{
 		ID:          uuid.NewString(),
 		TrainJobID:  jobID,
-		Name:        buildModelName(baseModelName, targetVulnType, job.FewshotSize, epochs, time.Now()),
+		Name:        artifactStem,
 		BaseModel:   baseModelName,
 		PromptID:    job.PromptID,
 		Artifact:    artifact,
@@ -328,11 +330,15 @@ func pythonExecutable() string {
 	return "python3"
 }
 
-func buildModelName(baseModel string, targetVulnType string, fewshotSize int, epochs int, createdAt time.Time) string {
+func buildArtifactStem(baseModel string, targetVulnType string, fewshotSize int, epochs int, datasetRef string, createdAt time.Time) string {
 	modelPart := normalizeBaseModelName(baseModel)
 	targetPart := sanitizeNameToken(targetVulnType)
+	datasetPart := normalizeDatasetRefName(datasetRef)
 	if targetPart == "" {
 		targetPart = "vulnerability"
+	}
+	if datasetPart == "" {
+		datasetPart = "dataset"
 	}
 	if fewshotSize <= 0 {
 		fewshotSize = 1
@@ -341,13 +347,37 @@ func buildModelName(baseModel string, targetVulnType string, fewshotSize int, ep
 		epochs = 1
 	}
 	return fmt.Sprintf(
-		"%s-%s-fs%d-e%d-%s",
+		"%s-%s-fs%d-e%d-%s-%s",
 		modelPart,
 		targetPart,
 		fewshotSize,
 		epochs,
+		datasetPart,
 		createdAt.Format("20060102-150405"),
 	)
+}
+
+func normalizeDatasetRefName(datasetRef string) string {
+	trimmed := strings.TrimSpace(datasetRef)
+	if trimmed == "" {
+		return "dataset"
+	}
+	if filepath.IsAbs(trimmed) {
+		base := filepath.Base(trimmed)
+		ext := filepath.Ext(base)
+		base = strings.TrimSuffix(base, ext)
+		return sanitizeNameToken(base)
+	}
+	if strings.HasPrefix(trimmed, "local:") {
+		p := strings.TrimSpace(strings.TrimPrefix(trimmed, "local:"))
+		if p != "" {
+			base := filepath.Base(p)
+			ext := filepath.Ext(base)
+			base = strings.TrimSuffix(base, ext)
+			return sanitizeNameToken(base)
+		}
+	}
+	return sanitizeNameToken(trimmed)
 }
 
 func normalizeBaseModelName(baseModel string) string {

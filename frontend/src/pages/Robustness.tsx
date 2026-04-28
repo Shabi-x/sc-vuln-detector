@@ -31,9 +31,11 @@ import {
 } from "../services/robust";
 import { getPageCache, setPageCache } from "../utils/pageCache";
 
-const STRATEGY_OPTIONS = [
-  { label: "调用链隐藏黑盒攻击", value: "call-chain-hiding" },
-];
+const ATTACK_METHOD = {
+  label: "调用链隐藏黑盒攻击",
+  value: "call-chain-hiding",
+  steps: ["核心脆弱代码搜索", "虚假调用链替换", "不可达路径隐藏"],
+};
 const ROBUSTNESS_CACHE_KEY = "page:robustness";
 
 export default function Robustness() {
@@ -42,7 +44,6 @@ export default function Robustness() {
     selectedContractIds?: string[];
     selectedPromptId?: string;
     selectedModelId?: string;
-    strategies?: string[];
     variantsPerSource?: number;
     currentJob?: RobustJob | null;
     metrics?: RobustMetrics | null;
@@ -65,9 +66,6 @@ export default function Robustness() {
   const [selectedModelId, setSelectedModelId] = useState<string | undefined>(
     cachedState?.selectedModelId,
   );
-  const [strategies, setStrategies] = useState<string[]>([
-    ...(cachedState?.strategies ?? ["call-chain-hiding"]),
-  ]);
   const [variantsPerSource, setVariantsPerSource] = useState(
     cachedState?.variantsPerSource ?? 1,
   );
@@ -118,7 +116,6 @@ export default function Robustness() {
       selectedContractIds,
       selectedPromptId,
       selectedModelId,
-      strategies,
       variantsPerSource,
       currentJob,
       metrics,
@@ -128,7 +125,6 @@ export default function Robustness() {
     selectedContractIds,
     selectedPromptId,
     selectedModelId,
-    strategies,
     variantsPerSource,
     currentJob,
     metrics,
@@ -189,17 +185,13 @@ export default function Robustness() {
       message.warning("请先选择模型、提示模板和合约");
       return;
     }
-    if (strategies.length === 0) {
-      message.warning("请至少选择一种扰动策略");
-      return;
-    }
     try {
       setLoading(true);
       const job = await createRobustJob({
         modelId: selectedModelId,
         promptId: selectedPromptId,
         contractIds: selectedContractIds,
-        strategies,
+        strategies: [ATTACK_METHOD.value],
         variantsPerSource,
       });
       setCurrentJob(job);
@@ -273,6 +265,18 @@ export default function Robustness() {
   }, [metrics]);
 
   const perContractRows = useMemo(() => metrics?.perContract ?? [], [metrics]);
+  const noAttackableSamples = !!metrics && (metrics.attackableContracts ?? 0) === 0;
+
+  const formatSkippedReason = (reason?: string) => {
+    if (!reason) return "--";
+    if (reason.includes("原始样本未被模型判定为目标漏洞")) {
+      return "该合约的原始检测结果为“无漏洞”，因此本次不进入攻击成功率统计。";
+    }
+    if (reason.includes("未定位到高敏感核心脆弱代码")) {
+      return "模型已识别该样本存在目标漏洞，但当前未定位到可用于构造攻击的高敏感核心脆弱代码。";
+    }
+    return reason;
+  };
 
   const labelTag = (l: string) => {
     if (l === "vulnerable") return <Tag color="red">有漏洞</Tag>;
@@ -349,7 +353,7 @@ export default function Robustness() {
       render: (v: number) => <Typography.Text>{v}</Typography.Text>,
     },
     {
-      title: "核心脆弱代码",
+      title: "核心脆弱代码 / 说明",
       width: 280,
       render: (_, r) =>
         r.coreFragments?.length ? (
@@ -362,7 +366,7 @@ export default function Robustness() {
           </Space>
         ) : (
           <Typography.Text type="secondary">
-            {r.skippedReason || "--"}
+            {formatSkippedReason(r.skippedReason)}
           </Typography.Text>
         ),
     },
@@ -472,6 +476,19 @@ export default function Robustness() {
 
         {activeTab === "run" ? (
           <>
+            <Card
+              size="small"
+              style={{ marginBottom: 16, borderRadius: 12, background: "#fafafa" }}
+              styles={{ body: { padding: 14 } }}
+            >
+              <Space direction="vertical" size={4} style={{ width: "100%" }}>
+                <Typography.Text strong>攻击方法：{ATTACK_METHOD.label}</Typography.Text>
+                <Typography.Text type="secondary">
+                  执行流程：{ATTACK_METHOD.steps.join(" → ")}
+                </Typography.Text>
+              </Space>
+            </Card>
+
             <Row gutter={16}>
               <Col xs={24} lg={8}>
                 <Typography.Text type="secondary">模型</Typography.Text>
@@ -517,18 +534,7 @@ export default function Robustness() {
             </Row>
 
             <Row gutter={16} style={{ marginTop: 16 }}>
-              <Col xs={24} lg={10}>
-                <Typography.Text type="secondary">攻击策略</Typography.Text>
-                <Select
-                  mode="multiple"
-                  style={{ width: "100%", marginTop: 8 }}
-                  value={strategies}
-                  onChange={setStrategies}
-                  options={STRATEGY_OPTIONS}
-                  placeholder="选择攻击策略"
-                />
-              </Col>
-              <Col xs={24} lg={6}>
+              <Col xs={24} lg={8}>
                 <Typography.Text type="secondary">
                   每份合约生成攻击变体数
                 </Typography.Text>
@@ -542,7 +548,7 @@ export default function Robustness() {
               </Col>
               <Col
                 xs={24}
-                lg={8}
+                lg={16}
                 style={{ display: "flex", alignItems: "flex-end" }}
               >
                 <Button
@@ -647,20 +653,40 @@ export default function Robustness() {
                       size="small"
                       style={{ borderRadius: 12, background: "#fafafa" }}
                     >
-                      <Pie
-                        data={pieData}
-                        angleField="value"
-                        colorField="type"
-                        height={220}
-                        innerRadius={0.55}
-                        legend={{ position: "bottom" }}
-                        label={{
-                          type: "spider",
-                          content: (d: any) =>
-                            `${d.type} ${typeof d.percent === "number" ? (d.percent * 100).toFixed(1) : "--"}%`,
-                        }}
-                        interactions={[{ type: "element-active" }]}
-                      />
+                      {pieData.length ? (
+                        <Pie
+                          data={pieData}
+                          angleField="value"
+                          colorField="type"
+                          height={220}
+                          innerRadius={0.55}
+                          legend={{ position: "bottom" }}
+                          label={{
+                            type: "spider",
+                            content: (d: any) =>
+                              `${d.type} ${typeof d.percent === "number" ? (d.percent * 100).toFixed(1) : "--"}%`,
+                          }}
+                          interactions={[{ type: "element-active" }]}
+                        />
+                      ) : (
+                        <div
+                          style={{
+                            height: 220,
+                            display: "flex",
+                            alignItems: "center",
+                            justifyContent: "center",
+                          }}
+                        >
+                          <Empty
+                            image={Empty.PRESENTED_IMAGE_SIMPLE}
+                            description={
+                              noAttackableSamples
+                                ? "本次评估中，原始样本未被模型判定为目标漏洞，因此暂无攻击成功率统计图。"
+                                : "本次评估暂未生成可展示的攻击成功率图。"
+                            }
+                          />
+                        </div>
+                      )}
                     </Card>
                   </Col>
                   <Col xs={24} lg={14}>
@@ -708,7 +734,11 @@ export default function Robustness() {
                         >
                           <Empty
                             image={Empty.PRESENTED_IMAGE_SIMPLE}
-                            description="暂无按策略明细（请重启后端后重新运行任务）"
+                            description={
+                              noAttackableSamples
+                                ? "本次评估中没有样本进入攻击统计，因此暂无按策略对比结果。"
+                                : "本次评估暂未生成按策略明细。"
+                            }
                           />
                         </div>
                       )}
@@ -732,7 +762,7 @@ export default function Robustness() {
                     emptyText: (
                       <Empty
                         image={Empty.PRESENTED_IMAGE_SIMPLE}
-                        description="暂无对比明细（请重启后端后重新运行任务）"
+                        description="本次评估暂无可展示的攻击明细。"
                       />
                     ),
                   }}

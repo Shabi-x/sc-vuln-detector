@@ -16,4 +16,4 @@ frontend/dist/
 frontend/.vite/
 
 # Python training outputs
-python_scripts/demo_outputs/
+python_scripts/outputs/

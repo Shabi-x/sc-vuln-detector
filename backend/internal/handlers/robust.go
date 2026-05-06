@@ -25,6 +25,7 @@ type createRobustJobRequest struct {
 	ModelID        string   `json:"modelId" binding:"required"`
 	PromptID       string   `json:"promptId" binding:"required"`
 	ContractIDs    []string `json:"contractIds" binding:"required"`
+	VictimModels   []string `json:"victimModels"`
 	Strategies     []string `json:"strategies"`
 	VariantsPerSrc int      `json:"variantsPerSource"`
 }
@@ -55,6 +56,7 @@ func (h *RobustHandlers) CreateJob(c *gin.Context) {
 		ModelID:        strings.TrimSpace(req.ModelID),
 		PromptID:       strings.TrimSpace(req.PromptID),
 		ContractIDs:    req.ContractIDs,
+		VictimModels:   req.VictimModels,
 		Strategies:     req.Strategies,
 		VariantsPerSrc: req.VariantsPerSrc,
 	})

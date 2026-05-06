@@ -10,6 +10,7 @@ import {
   Row,
   Select,
   Space,
+  Statistic,
   Table,
   Tag,
   Tabs,
@@ -18,7 +19,7 @@ import {
   message,
 } from "antd";
 import type { ColumnsType } from "antd/es/table";
-import { Pie, Column } from "@ant-design/plots";
+import { Column } from "@ant-design/plots";
 import { listContracts, type ContractSummary } from "../services/contracts";
 import { listPrompts, type Prompt } from "../services/prompts";
 import { listModels, type TrainedModel } from "../services/training";
@@ -32,11 +33,30 @@ import {
 import { getPageCache, setPageCache } from "../utils/pageCache";
 
 const ATTACK_METHOD = {
-  label: "调用链隐藏黑盒攻击",
-  value: "call-chain-hiding",
-  steps: ["核心脆弱代码搜索", "虚假调用链替换", "不可达路径隐藏"],
+  label: "DIP 黑盒对抗攻击",
+  value: "dip-attack",
+  steps: ["作用域感知变量重命名", "梯度估计位置选择", "死代码插入扰动"],
 };
 const ROBUSTNESS_CACHE_KEY = "page:robustness";
+const VICTIM_MODEL_OPTIONS = [
+  { label: "CodeBERT", value: "codebert" },
+  { label: "AME", value: "AME" },
+  { label: "GPSCVul", value: "GPSCVul" },
+  { label: "ConvMHSA", value: "ConvMHSA" },
+  { label: "Clear", value: "Clear" },
+];
+
+function formatFixed(value: unknown, digits: number, fallback = "--") {
+  return typeof value === "number" && Number.isFinite(value)
+    ? value.toFixed(digits)
+    : fallback;
+}
+
+function formatPercent(value: unknown, digits = 2, fallback = "--") {
+  return typeof value === "number" && Number.isFinite(value)
+    ? `${(value * 100).toFixed(digits)}%`
+    : fallback;
+}
 
 export default function Robustness() {
   const cachedState = getPageCache<{
@@ -44,6 +64,8 @@ export default function Robustness() {
     selectedContractIds?: string[];
     selectedPromptId?: string;
     selectedModelId?: string;
+    selectedVictimModels?: string[];
+    activeVictimModel?: string;
     variantsPerSource?: number;
     currentJob?: RobustJob | null;
     metrics?: RobustMetrics | null;
@@ -65,6 +87,12 @@ export default function Robustness() {
   );
   const [selectedModelId, setSelectedModelId] = useState<string | undefined>(
     cachedState?.selectedModelId,
+  );
+  const [selectedVictimModels, setSelectedVictimModels] = useState<string[]>(
+    cachedState?.selectedVictimModels ?? VICTIM_MODEL_OPTIONS.map((item) => item.value),
+  );
+  const [activeVictimModel, setActiveVictimModel] = useState<string | undefined>(
+    cachedState?.activeVictimModel ?? "codebert",
   );
   const [variantsPerSource, setVariantsPerSource] = useState(
     cachedState?.variantsPerSource ?? 1,
@@ -93,12 +121,12 @@ export default function Robustness() {
         setPrompts(ps);
         setModels(ms);
         setHistoryJobs(hs);
-        if (cs.length > 0) {
+        if (cs.length > 0 && (!cachedState?.selectedContractIds || cachedState.selectedContractIds.length === 0)) {
           setSelectedContractIds([cs[0]!.id]);
         }
-        if (ps.length > 0) setSelectedPromptId(ps[0]!.id);
+        if (ps.length > 0 && !cachedState?.selectedPromptId) setSelectedPromptId(ps[0]!.id);
         const loaded = ms.find((m) => m.isLoaded);
-        if (loaded) setSelectedModelId(loaded.id);
+        if (loaded && !cachedState?.selectedModelId) setSelectedModelId(loaded.id);
       } catch (e) {
         message.error(
           `初始化失败：${e instanceof Error ? e.message : String(e)}`,
@@ -116,6 +144,8 @@ export default function Robustness() {
       selectedContractIds,
       selectedPromptId,
       selectedModelId,
+      selectedVictimModels,
+      activeVictimModel,
       variantsPerSource,
       currentJob,
       metrics,
@@ -125,6 +155,8 @@ export default function Robustness() {
     selectedContractIds,
     selectedPromptId,
     selectedModelId,
+    selectedVictimModels,
+    activeVictimModel,
     variantsPerSource,
     currentJob,
     metrics,
@@ -142,6 +174,16 @@ export default function Robustness() {
       }
     };
   }, [currentJob?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    const victimResults = metrics?.victimResults ?? [];
+    if (victimResults.length === 0) {
+      return;
+    }
+    if (!activeVictimModel || !victimResults.some((item) => item.victimModel === activeVictimModel)) {
+      setActiveVictimModel(victimResults[0]!.victimModel);
+    }
+  }, [metrics, activeVictimModel]);
 
   const refreshHistory = async () => {
     try {
@@ -191,6 +233,7 @@ export default function Robustness() {
         modelId: selectedModelId,
         promptId: selectedPromptId,
         contractIds: selectedContractIds,
+        victimModels: selectedVictimModels,
         strategies: [ATTACK_METHOD.value],
         variantsPerSource,
       });
@@ -218,62 +261,55 @@ export default function Robustness() {
     return 100;
   }, [currentJob]);
 
-  const attackSuccessRateText =
-    metrics && typeof metrics.attackSuccessRate === "number"
-      ? `${(metrics.attackSuccessRate * 100).toFixed(2)}%`
+  const activeVictim = useMemo(
+    () =>
+      metrics?.victimResults?.find((item) => item.victimModel === activeVictimModel) ??
+      metrics?.victimResults?.[0],
+    [metrics, activeVictimModel],
+  );
+
+  const supportedVictims = useMemo(
+    () => (metrics?.victimResults ?? []).filter((item) => item.supported),
+    [metrics],
+  );
+
+  const queryComparisonData = useMemo(() => {
+    return supportedVictims
+      .filter((item) => (item.avgQueries ?? 0) > 0)
+      .map((item) => ({
+        victim: item.displayName,
+        value: Number((item.avgQueries ?? 0).toFixed(2)),
+      }));
+  }, [supportedVictims]);
+
+  const codebleuComparisonData = useMemo(() => {
+    return supportedVictims
+      .filter((item) => (item.avgCodeBLEU ?? 0) > 0)
+      .map((item) => ({
+        victim: item.displayName,
+        value: Number((item.avgCodeBLEU ?? 0).toFixed(4)),
+      }));
+  }, [supportedVictims]);
+
+  const showQueryChart = queryComparisonData.length >= 2;
+  const showCodebleuChart = codebleuComparisonData.length >= 2;
+
+  const perContractRows = useMemo(() => activeVictim?.perContract ?? [], [activeVictim]);
+  const attackSuccessRateText = formatPercent(activeVictim?.attackSuccessRate);
+  const accuracyDropRateText = formatPercent(activeVictim?.accuracyDropRate);
+  const avgDropText = formatFixed(activeVictim?.avgConfidenceDrop, 4);
+  const avgQueriesText = formatFixed(activeVictim?.avgQueries, 2);
+  const avgPerturbationRateText = formatPercent(activeVictim?.avgPerturbationRate);
+  const avgVisiblePerturbationRateText = formatPercent(activeVictim?.avgVisiblePerturbationRate);
+  const avgCodeBLEUText = formatFixed(activeVictim?.avgCodeBLEU, 4);
+  const queryBudgetHitsText =
+    typeof activeVictim?.queryBudgetHits === "number"
+      ? `${activeVictim.queryBudgetHits}`
       : "--";
-  const accuracyDropRateText =
-    metrics && typeof metrics.accuracyDropRate === "number"
-      ? `${(metrics.accuracyDropRate * 100).toFixed(2)}%`
-      : "--";
-  const avgDropText =
-    metrics && typeof metrics.avgConfidenceDrop === "number"
-      ? metrics.avgConfidenceDrop.toFixed(4)
-      : "--";
-
-  const pieData = useMemo(() => {
-    if (!metrics?.totalAdversarial) return [];
-    const flipped = metrics.attackSuccesses ?? 0;
-    const stable = Math.max(0, metrics.totalAdversarial - flipped);
-    return [
-      { type: "攻击成功", value: flipped },
-      { type: "攻击未成功", value: stable },
-    ];
-  }, [metrics]);
-
-  const strategyChartData = useMemo(() => {
-    const arr = metrics?.perStrategy ?? [];
-    return arr.flatMap((s) => {
-      const total = s.totalVariants ?? 0;
-      const flipped = s.attackSuccesses ?? 0;
-      const stable = Math.max(0, total - flipped);
-      return [
-        {
-          strategy: s.strategy,
-          kind: "攻击未成功",
-          value: stable,
-          successRate: Math.round((s.attackSuccessRate ?? 0) * 10000) / 100,
-        },
-        {
-          strategy: s.strategy,
-          kind: "攻击成功",
-          value: flipped,
-          successRate: Math.round((s.attackSuccessRate ?? 0) * 10000) / 100,
-        },
-      ];
-    });
-  }, [metrics]);
-
-  const perContractRows = useMemo(() => metrics?.perContract ?? [], [metrics]);
-  const noAttackableSamples = !!metrics && (metrics.attackableContracts ?? 0) === 0;
-
   const formatSkippedReason = (reason?: string) => {
     if (!reason) return "--";
     if (reason.includes("原始样本未被模型判定为目标漏洞")) {
       return "该合约的原始检测结果为“无漏洞”，因此本次不进入攻击成功率统计。";
-    }
-    if (reason.includes("未定位到高敏感核心脆弱代码")) {
-      return "模型已识别该样本存在目标漏洞，但当前未定位到可用于构造攻击的高敏感核心脆弱代码。";
     }
     return reason;
   };
@@ -292,7 +328,7 @@ export default function Robustness() {
       dataIndex: "contractName",
       width: 180,
       render: (v: string, r) => (
-        <Space direction="vertical" size={2} style={{ width: "100%" }}>
+        <Space orientation="vertical" size={2} style={{ width: "100%" }}>
           <Tooltip title={v}>
             <Typography.Text
               strong
@@ -334,7 +370,7 @@ export default function Robustness() {
         <Space size={8}>
           {labelTag(r.origLabel)}
           <Typography.Text type="secondary">
-            {r.origConfidence.toFixed(4)}
+            {formatFixed(r.origConfidence, 4)}
           </Typography.Text>
         </Space>
       ),
@@ -347,40 +383,123 @@ export default function Robustness() {
       ),
     },
     {
-      title: "翻转次数",
+      title: "成功次数",
       dataIndex: "flipped",
       width: 110,
       render: (v: number) => <Typography.Text>{v}</Typography.Text>,
     },
     {
-      title: "核心脆弱代码 / 说明",
+      title: "DIP 攻击说明",
       width: 280,
-      render: (_, r) =>
-        r.coreFragments?.length ? (
-          <Space direction="vertical" size={2}>
-            {r.coreFragments.slice(0, 3).map((fragment) => (
-              <Typography.Text key={`${r.baseContractId}-${fragment.lineNumber}`} type="secondary">
-                L{fragment.lineNumber} {fragment.content}
+      render: (_, r) => (
+        <Space orientation="vertical" size={2}>
+          {r.bestAttackSample ? (
+            <>
+              <Typography.Text type="secondary">
+                最优变体 #{r.bestAttackSample.variantIndex}，查询 {r.bestAttackSample.queries} 次
               </Typography.Text>
-            ))}
-          </Space>
-        ) : (
-          <Typography.Text type="secondary">
-            {formatSkippedReason(r.skippedReason)}
-          </Typography.Text>
-        ),
+              <Typography.Text type="secondary">
+                可见扰动率 {formatPercent(r.bestAttackSample.visiblePerturbationRate)}，CodeBLEU {formatFixed(r.bestAttackSample.codebleu, 4)}
+              </Typography.Text>
+              <Typography.Text type="secondary">
+                {r.bestAttackSample.queryBudgetHit ? "已打满查询预算，" : ""}置信度下降 {formatFixed(r.bestAttackSample.confidenceDrop, 4)}
+              </Typography.Text>
+            </>
+          ) : (
+            <Typography.Text type="secondary">
+              {formatSkippedReason(r.skippedReason)}
+            </Typography.Text>
+          )}
+        </Space>
+      ),
+    },
+    {
+      title: "平均查询次数",
+      dataIndex: "avgQueries",
+      width: 130,
+      render: (v: number) => <Typography.Text>{formatFixed(v, 2)}</Typography.Text>,
+    },
+    {
+      title: "可见扰动率",
+      dataIndex: "avgVisiblePerturbationRate",
+      width: 130,
+      render: (v: number) => (
+        <Typography.Text>{formatPercent(v)}</Typography.Text>
+      ),
+    },
+    {
+      title: "CodeBLEU",
+      dataIndex: "avgCodeBLEU",
+      width: 120,
+      render: (v: number) => <Typography.Text>{formatFixed(v, 4)}</Typography.Text>,
+    },
+    {
+      title: "预算命中",
+      dataIndex: "queryBudgetHits",
+      width: 110,
+      render: (v: number) => <Typography.Text>{v} 次</Typography.Text>,
     },
     {
       title: "对抗平均置信度",
       dataIndex: "avgAdvConfidence",
       width: 150,
-      render: (v: number) => <Typography.Text>{v.toFixed(4)}</Typography.Text>,
+      render: (v: number) => <Typography.Text>{formatFixed(v, 4)}</Typography.Text>,
     },
     {
       title: "平均置信度下降",
       dataIndex: "avgConfDrop",
       width: 150,
-      render: (v: number) => <Typography.Text>{v.toFixed(4)}</Typography.Text>,
+      render: (v: number) => <Typography.Text>{formatFixed(v, 4)}</Typography.Text>,
+    },
+  ];
+
+  const victimColumns: ColumnsType<
+    NonNullable<RobustMetrics["victimResults"]>[number]
+  > = [
+    {
+      title: "受害模型",
+      dataIndex: "displayName",
+      width: 140,
+      render: (v: string, r) => (
+        <Button
+          type={r.victimModel === activeVictim?.victimModel ? "primary" : "default"}
+          size="small"
+          onClick={() => setActiveVictimModel(r.victimModel)}
+        >
+          {v}
+        </Button>
+      ),
+    },
+    {
+      title: "状态",
+      width: 110,
+      render: (_, r) =>
+        r.supported ? <Tag color="green">可评估</Tag> : <Tag>暂不支持</Tag>,
+    },
+    {
+      title: "攻击成功率",
+      width: 120,
+      render: (_, r) => formatPercent(r.attackSuccessRate),
+    },
+    {
+      title: "准确率下降",
+      width: 120,
+      render: (_, r) => formatPercent(r.accuracyDropRate),
+    },
+    {
+      title: "平均查询次数",
+      width: 120,
+      render: (_, r) => formatFixed(r.avgQueries, 2),
+    },
+    {
+      title: "可见扰动率",
+      width: 120,
+      render: (_, r) => formatPercent(r.avgVisiblePerturbationRate),
+    },
+    {
+      title: "CodeBLEU",
+      width: 100,
+      render: (_, r) => formatFixed(r.avgCodeBLEU, 4),
     },
   ];
 
@@ -444,9 +563,9 @@ export default function Robustness() {
   ];
 
   return (
-    <Space direction="vertical" size={16} style={{ width: "100%" }}>
+    <Space orientation="vertical" size={16} style={{ width: "100%" }}>
       <Card
-        bordered={false}
+        variant="borderless"
         style={{ borderRadius: 12 }}
         styles={{ body: { padding: 20 } }}
       >
@@ -459,7 +578,7 @@ export default function Robustness() {
               对抗攻击与鲁棒性
             </Typography.Title>
             <Typography.Text type="secondary">
-              按“核心脆弱代码搜索 → 虚假调用链替换 → 不可达路径隐藏”的黑盒攻击流程生成对抗样本，并评估目标漏洞检测模型的鲁棒性。
+              基于 DIP 黑盒攻击流程生成对抗样本，并从攻击成功率、准确率下降、查询成本、可见扰动率与代码相似性等维度评估目标漏洞检测模型的鲁棒性。
             </Typography.Text>
           </Col>
         </Row>
@@ -481,10 +600,13 @@ export default function Robustness() {
               style={{ marginBottom: 16, borderRadius: 12, background: "#fafafa" }}
               styles={{ body: { padding: 14 } }}
             >
-              <Space direction="vertical" size={4} style={{ width: "100%" }}>
+              <Space orientation="vertical" size={4} style={{ width: "100%" }}>
                 <Typography.Text strong>攻击方法：{ATTACK_METHOD.label}</Typography.Text>
                 <Typography.Text type="secondary">
                   执行流程：{ATTACK_METHOD.steps.join(" → ")}
+                </Typography.Text>
+                <Typography.Text type="secondary">
+                  评估口径：仅统计原始预测为“有漏洞”的样本，并优先关注进入模型可见窗口的扰动、查询成本与代码相似性。
                 </Typography.Text>
               </Space>
             </Card>
@@ -535,6 +657,17 @@ export default function Robustness() {
 
             <Row gutter={16} style={{ marginTop: 16 }}>
               <Col xs={24} lg={8}>
+                <Typography.Text type="secondary">受害模型</Typography.Text>
+                <Select
+                  mode="multiple"
+                  style={{ width: "100%", marginTop: 8 }}
+                  value={selectedVictimModels}
+                  onChange={setSelectedVictimModels}
+                  options={VICTIM_MODEL_OPTIONS}
+                  placeholder="选择参与对比的受害模型"
+                />
+              </Col>
+              <Col xs={24} lg={8}>
                 <Typography.Text type="secondary">
                   每份合约生成攻击变体数
                 </Typography.Text>
@@ -570,7 +703,7 @@ export default function Robustness() {
               任务进度
             </Typography.Title>
             {currentJob ? (
-              <Space direction="vertical" size={8} style={{ width: "100%" }}>
+              <Space orientation="vertical" size={8} style={{ width: "100%" }}>
                 <Typography.Text type="secondary">
                   当前任务：
                   <Typography.Text code>{currentJob.id}</Typography.Text>{" "}
@@ -610,148 +743,236 @@ export default function Robustness() {
               level={5}
               style={{ marginTop: 0, marginBottom: 8 }}
             >
-              鲁棒性指标
+              受害模型对比
             </Typography.Title>
             {metrics ? (
-              <Space direction="vertical" size={6} style={{ width: "100%" }}>
-                <Typography.Text>
-                  攻击目标漏洞：{metrics.targetVulnType ?? "--"}，可攻击样本：
-                  {metrics.attackableContracts ?? "--"}，对抗样本数：
-                  {metrics.totalAdversarial ?? "--"}
-                </Typography.Text>
-                <Typography.Text>
-                  攻击成功率：
-                  <Typography.Text strong>{attackSuccessRateText}</Typography.Text>
-                </Typography.Text>
-                <Typography.Text>
-                  准确率下降比率：
-                  <Typography.Text strong>{accuracyDropRateText}</Typography.Text>
-                </Typography.Text>
-                <Typography.Text>
-                  平均置信度下降：
-                  <Typography.Text strong>{avgDropText}</Typography.Text>
-                </Typography.Text>
-              </Space>
+              <Table
+                rowKey="victimModel"
+                size="small"
+                columns={victimColumns}
+                dataSource={metrics.victimResults ?? []}
+                pagination={false}
+                locale={{
+                  emptyText: (
+                    <Empty
+                      image={Empty.PRESENTED_IMAGE_SIMPLE}
+                      description="本次评估暂无受害模型结果。"
+                    />
+                  ),
+                }}
+              />
             ) : (
               <Typography.Text type="secondary">
                 任务完成后将展示鲁棒性指标。
               </Typography.Text>
             )}
 
+            {activeVictim?.visibilityWarning ? (
+              <Card
+                size="small"
+                style={{ marginTop: 12, borderRadius: 12, background: "#fff7e6", borderColor: "#ffd591" }}
+              >
+                <Typography.Text style={{ color: "#ad6800" }}>
+                  {activeVictim.visibilityWarning}
+                </Typography.Text>
+              </Card>
+            ) : null}
+
             {metrics ? (
               <>
-                <Divider style={{ margin: "16px 0" }} />
-                <Row gutter={[16, 16]}>
-                  <Col xs={24} lg={10}>
-                    <Typography.Title
-                      level={5}
-                      style={{ marginTop: 0, marginBottom: 8 }}
-                    >
-                      攻击成功占比
-                    </Typography.Title>
-                    <Card
-                      size="small"
-                      style={{ borderRadius: 12, background: "#fafafa" }}
-                    >
-                      {pieData.length ? (
-                        <Pie
-                          data={pieData}
-                          angleField="value"
-                          colorField="type"
-                          height={220}
-                          innerRadius={0.55}
-                          legend={{ position: "bottom" }}
-                          label={{
-                            type: "spider",
-                            content: (d: any) =>
-                              `${d.type} ${typeof d.percent === "number" ? (d.percent * 100).toFixed(1) : "--"}%`,
-                          }}
-                          interactions={[{ type: "element-active" }]}
-                        />
-                      ) : (
-                        <div
-                          style={{
-                            height: 220,
-                            display: "flex",
-                            alignItems: "center",
-                            justifyContent: "center",
-                          }}
-                        >
-                          <Empty
-                            image={Empty.PRESENTED_IMAGE_SIMPLE}
-                            description={
-                              noAttackableSamples
-                                ? "本次评估中，原始样本未被模型判定为目标漏洞，因此暂无攻击成功率统计图。"
-                                : "本次评估暂未生成可展示的攻击成功率图。"
-                            }
-                          />
-                        </div>
-                      )}
-                    </Card>
-                  </Col>
-                  <Col xs={24} lg={14}>
-                    <Typography.Title
-                      level={5}
-                      style={{ marginTop: 0, marginBottom: 8 }}
-                    >
-                      按策略攻击成功情况
-                    </Typography.Title>
-                    <Card
-                      size="small"
-                      style={{ borderRadius: 12, background: "#fafafa" }}
-                    >
-                      {strategyChartData.length ? (
-                        <Column
-                          data={strategyChartData}
-                          xField="strategy"
-                          yField="value"
-                          seriesField="kind"
-                          isStack
-                          height={220}
-                          xAxis={{
-                            label: { autoHide: true, autoRotate: false },
-                          }}
-                          yAxis={{
-                            min: 0,
-                            tickCount: 6,
-                            title: { text: "样本数" },
-                          }}
-                            tooltip={{
-                              formatter: (d: any) => ({
-                                name: d.kind,
-                                value: `${d.value}（成功率 ${d.successRate}%）`,
-                              }),
-                            }}
-                          />
-                      ) : (
-                        <div
-                          style={{
-                            height: 220,
-                            display: "flex",
-                            alignItems: "center",
-                            justifyContent: "center",
-                          }}
-                        >
-                          <Empty
-                            image={Empty.PRESENTED_IMAGE_SIMPLE}
-                            description={
-                              noAttackableSamples
-                                ? "本次评估中没有样本进入攻击统计，因此暂无按策略对比结果。"
-                                : "本次评估暂未生成按策略明细。"
-                            }
-                          />
-                        </div>
-                      )}
-                    </Card>
-                  </Col>
-                </Row>
-
                 <Divider style={{ margin: "16px 0" }} />
                 <Typography.Title
                   level={5}
                   style={{ marginTop: 0, marginBottom: 8 }}
+                >
+                  {(activeVictim?.displayName ?? "当前模型")} 指标详情
+                </Typography.Title>
+                {activeVictim ? (
+                  <Space orientation="vertical" size={10} style={{ width: "100%" }}>
+                    <Row gutter={[12, 12]}>
+                      <Col xs={12} lg={6}>
+                        <Card size="small" style={{ borderRadius: 12 }}>
+                          <Statistic title="攻击成功率" value={attackSuccessRateText} />
+                        </Card>
+                      </Col>
+                      <Col xs={12} lg={6}>
+                        <Card size="small" style={{ borderRadius: 12 }}>
+                          <Statistic title="准确率下降" value={accuracyDropRateText} />
+                        </Card>
+                      </Col>
+                      <Col xs={12} lg={6}>
+                        <Card size="small" style={{ borderRadius: 12 }}>
+                          <Statistic title="平均查询次数" value={avgQueriesText} />
+                        </Card>
+                      </Col>
+                      <Col xs={12} lg={6}>
+                        <Card size="small" style={{ borderRadius: 12 }}>
+                          <Statistic title="平均 CodeBLEU" value={avgCodeBLEUText} />
+                        </Card>
+                      </Col>
+                    </Row>
+                    <Card
+                      size="small"
+                      style={{ borderRadius: 14, background: "#fafafa" }}
+                      styles={{ body: { padding: 16 } }}
                     >
-                  原始样本与调用链隐藏攻击明细
+                      <Row gutter={[16, 16]}>
+                        <Col xs={24} lg={8}>
+                          <Space orientation="vertical" size={6} style={{ width: "100%" }}>
+                            <Typography.Text type="secondary">实验范围</Typography.Text>
+                            <div>
+                              <Typography.Text strong>攻击目标漏洞：</Typography.Text>
+                              <Typography.Text>{activeVictim.targetVulnType ?? metrics.targetVulnType ?? "--"}</Typography.Text>
+                            </div>
+                            <div>
+                              <Typography.Text strong>可攻击样本：</Typography.Text>
+                              <Typography.Text>{activeVictim.attackableContracts ?? "--"}</Typography.Text>
+                            </div>
+                            <div>
+                              <Typography.Text strong>对抗样本数：</Typography.Text>
+                              <Typography.Text>{activeVictim.totalAdversarial ?? "--"}</Typography.Text>
+                            </div>
+                          </Space>
+                        </Col>
+                        <Col xs={24} lg={8}>
+                          <Space orientation="vertical" size={6} style={{ width: "100%" }}>
+                            <Typography.Text type="secondary">攻击效果</Typography.Text>
+                            <div>
+                              <Typography.Text strong>攻击成功率：</Typography.Text>
+                              <Typography.Text>{attackSuccessRateText}</Typography.Text>
+                            </div>
+                            <div>
+                              <Typography.Text strong>准确率下降值：</Typography.Text>
+                              <Typography.Text>{accuracyDropRateText}</Typography.Text>
+                            </div>
+                            <div>
+                              <Typography.Text strong>平均置信度下降：</Typography.Text>
+                              <Typography.Text>{avgDropText}</Typography.Text>
+                            </div>
+                          </Space>
+                        </Col>
+                        <Col xs={24} lg={8}>
+                          <Space orientation="vertical" size={6} style={{ width: "100%" }}>
+                            <Typography.Text type="secondary">攻击成本与质量</Typography.Text>
+                            <div>
+                              <Typography.Text strong>平均查询次数：</Typography.Text>
+                              <Typography.Text>{avgQueriesText}</Typography.Text>
+                            </div>
+                            <div>
+                              <Typography.Text strong>总扰动率：</Typography.Text>
+                              <Typography.Text>{avgPerturbationRateText}</Typography.Text>
+                            </div>
+                            <div>
+                              <Typography.Text strong>可见扰动率：</Typography.Text>
+                              <Typography.Text>{avgVisiblePerturbationRateText}</Typography.Text>
+                            </div>
+                            <div>
+                              <Typography.Text strong>平均 CodeBLEU：</Typography.Text>
+                              <Typography.Text>{avgCodeBLEUText}</Typography.Text>
+                            </div>
+                            <div>
+                              <Typography.Text strong>查询上限命中数：</Typography.Text>
+                              <Typography.Text>{queryBudgetHitsText}</Typography.Text>
+                            </div>
+                          </Space>
+                        </Col>
+                      </Row>
+                    </Card>
+                    {!activeVictim.supported ? (
+                      <Typography.Text type="secondary">
+                        {activeVictim.skippedReason ?? "当前漏洞类型暂未接入该受害模型。"}
+                      </Typography.Text>
+                    ) : null}
+                  </Space>
+                ) : (
+                  <Typography.Text type="secondary">
+                    请先从上方受害模型对比表中选择一个模型查看详情。
+                  </Typography.Text>
+                )}
+
+                <Divider style={{ margin: "16px 0" }} />
+                {(showQueryChart || showCodebleuChart) ? (
+                <Row gutter={[16, 16]}>
+                  {showQueryChart ? (
+                  <Col xs={24} lg={12}>
+                    <Typography.Title
+                      level={5}
+                      style={{ marginTop: 0, marginBottom: 8 }}
+                    >
+                      多模型查询成本对比
+                    </Typography.Title>
+                    <Card
+                      size="small"
+                      style={{ borderRadius: 12, background: "#fafafa" }}
+                    >
+                      <Column
+                          data={queryComparisonData}
+                          xField="victim"
+                          yField="value"
+                          height={220}
+                          label={{
+                            position: "top",
+                            content: (d: any) => formatFixed(d.value, 2),
+                          }}
+                          xAxis={{ label: { autoHide: true, autoRotate: false } }}
+                          yAxis={{ title: { text: "平均查询次数" } }}
+                          tooltip={{
+                            formatter: (d: any) => ({
+                              name: d.victim,
+                              value: `平均查询次数 ${formatFixed(d.value, 2)}`,
+                            }),
+                          }}
+                        />
+                    </Card>
+                  </Col>
+                  ) : null}
+                  {showCodebleuChart ? (
+                  <Col xs={24} lg={12}>
+                    <Typography.Title
+                      level={5}
+                      style={{ marginTop: 0, marginBottom: 8 }}
+                    >
+                      多模型代码相似度对比
+                    </Typography.Title>
+                    <Card
+                      size="small"
+                      style={{ borderRadius: 12, background: "#fafafa" }}
+                    >
+                      <Column
+                          data={codebleuComparisonData}
+                          xField="victim"
+                          yField="value"
+                          height={220}
+                          label={{
+                            position: "top",
+                            content: (d: any) => formatFixed(d.value, 4),
+                          }}
+                          xAxis={{ label: { autoHide: true, autoRotate: false } }}
+                          yAxis={{ title: { text: "平均 CodeBLEU" } }}
+                          tooltip={{
+                            formatter: (d: any) => ({
+                              name: d.victim,
+                              value: `平均 CodeBLEU ${formatFixed(d.value, 4)}`,
+                            }),
+                          }}
+                        />
+                    </Card>
+                  </Col>
+                  ) : null}
+                </Row>
+                ) : (
+                  <Card size="small" style={{ borderRadius: 12, background: "#fafafa" }}>
+                    <Typography.Text type="secondary">
+                      本轮评估中攻击结论指标大多接近 0，图表信息量不足，因此这里只保留对比表和文本摘要。
+                    </Typography.Text>
+                  </Card>
+                )}
+
+                <Typography.Title
+                  level={5}
+                  style={{ marginTop: 0, marginBottom: 8 }}
+                    >
+                  原始样本与 DIP 攻击明细
                 </Typography.Title>
                 <Table
                   rowKey="baseContractId"
@@ -772,7 +993,7 @@ export default function Robustness() {
             ) : null}
           </>
         ) : (
-          <Space direction="vertical" size={12} style={{ width: "100%" }}>
+          <Space orientation="vertical" size={12} style={{ width: "100%" }}>
             <Row justify="space-between" align="middle">
               <Col>
                 <Typography.Text type="secondary">

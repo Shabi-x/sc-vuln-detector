@@ -17,3 +17,12 @@ frontend/.vite/
 
 # Python training outputs
 python_scripts/outputs/
+python_scripts/victim_cache/
+
+# Local backend data
+backend/data/*.bak
+backend/data/*.bak-*
+
+# Runtime caches
+backend/data/__pycache__/
+python_scripts/**/__pycache__/

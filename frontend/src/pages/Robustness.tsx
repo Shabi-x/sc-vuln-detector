@@ -890,6 +890,28 @@ export default function Robustness() {
                   </Typography.Text>
                 )}
 
+                <Typography.Title
+                  level={5}
+                  style={{ marginTop: 0, marginBottom: 8 }}
+                    >
+                  原始样本与 DIP 攻击明细
+                </Typography.Title>
+                <Table
+                  rowKey="baseContractId"
+                  size="small"
+                  columns={contractColumns}
+                  dataSource={perContractRows}
+                  locale={{
+                    emptyText: (
+                      <Empty
+                        image={Empty.PRESENTED_IMAGE_SIMPLE}
+                        description="本次评估暂无可展示的攻击明细。"
+                      />
+                    ),
+                  }}
+                  pagination={{ pageSize: 6, hideOnSinglePage: true }}
+                />
+
                 <Divider style={{ margin: "16px 0" }} />
                 {(showQueryChart || showCodebleuChart) ? (
                 <Row gutter={[16, 16]}>
@@ -963,32 +985,10 @@ export default function Robustness() {
                 ) : (
                   <Card size="small" style={{ borderRadius: 12, background: "#fafafa" }}>
                     <Typography.Text type="secondary">
-                      本轮评估中攻击结论指标大多接近 0，图表信息量不足，因此这里只保留对比表和文本摘要。
+                      本轮评估中攻击结论指标大多接近 0，图表信息量不足，因此这里只保留对比表和样本明细。
                     </Typography.Text>
                   </Card>
                 )}
-
-                <Typography.Title
-                  level={5}
-                  style={{ marginTop: 0, marginBottom: 8 }}
-                    >
-                  原始样本与 DIP 攻击明细
-                </Typography.Title>
-                <Table
-                  rowKey="baseContractId"
-                  size="small"
-                  columns={contractColumns}
-                  dataSource={perContractRows}
-                  locale={{
-                    emptyText: (
-                      <Empty
-                        image={Empty.PRESENTED_IMAGE_SIMPLE}
-                        description="本次评估暂无可展示的攻击明细。"
-                      />
-                    ),
-                  }}
-                  pagination={{ pageSize: 6, hideOnSinglePage: true }}
-                />
               </>
             ) : null}
           </>
